@@ -17,6 +17,14 @@ const FILEMOON_API_TIMEOUT_MS = 3500;
 // completes ~90% of the time; anything slower is not worth the shared event loop.
 const MAX_POW_DIFFICULTY = 6;
 const MAX_POW_MS = 3000;
+// embed69 lists every server it knows about, and each one costs a fetch. The gate
+// below admits anything that is not an unresolvable file locker, so the number of
+// attempts has to be capped here instead of by the shortness of an allowlist.
+const MAX_EMBED69_ATTEMPTS = 5;
+// VOE rotates its mirror domains constantly, so pages are recognised by their
+// payload rather than their hostname. Bounded because the scan runs on every page
+// that reaches the fallback.
+const MAX_VOE_PAYLOADS = 6;
 
 function unpack(p, a, c, k, e, d) {
   const e_func = function(c) {
@@ -33,6 +41,30 @@ function unpack(p, a, c, k, e, d) {
     }
   }
   return p;
+}
+
+/**
+ * Yields the decoded body of every Dean Edwards packed script in the page. Hosts
+ * that hide a player config rather than a bare stream URL (VidGuard, for one) need
+ * the same decode pass the direct extractor does, so it lives here rather than
+ * inline in one caller.
+ */
+function* iterUnpackedScripts(html) {
+  const packerRegex = /eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*d\s*\)[\s\S]*?\}\s*\(\s*(['"])([\s\S]*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])([\s\S]*?)\5\.split\(['"]\|['"]\)/gi;
+
+  let match;
+  while ((match = packerRegex.exec(html || '')) !== null) {
+    try {
+      const p = match[2].trim();
+      const a = parseInt(match[3]);
+      const c = parseInt(match[4]);
+      const k = match[6].trim().split('|');
+
+      yield unpack(p, a, c, k, {}, {});
+    } catch (err) {
+      console.error('Unpacker: Failed to decode script block:', err.message);
+    }
+  }
 }
 
 /**
@@ -100,32 +132,18 @@ function extractDirectStream(html, baseUrl) {
   }
 
   // 2. Scan and unpack packed scripts (e.g. vidhide, hlswish, vimeos)
-  const packerRegex = /eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*d\s*\)[\s\S]*?\}\s*\(\s*(['"])([\s\S]*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])([\s\S]*?)\5\.split\(['"]\|['"]\)/gi;
-  
-  let match;
-  while ((match = packerRegex.exec(normalizedHtml)) !== null) {
-    try {
-      let p = match[2].trim();
-      const a = parseInt(match[3]);
-      const c = parseInt(match[4]);
-      let kStr = match[6].trim();
-      const k = kStr.split('|');
-      
-      const unpacked = unpack(p, a, c, k, {}, {});
-      const streamMatches = unpacked.match(directRegex) || [];
-      const validStreams = streamMatches.map((link) => normalizeUrl(link, baseUrl)).filter(Boolean).filter(link => {
-        const l = link.toLowerCase();
-        return !l.includes('analytics')
-          && !l.includes('ads')
-          && !l.includes('test-videos.co.uk')
-          && !l.includes('big_buck_bunny');
-      });
+  for (const unpacked of iterUnpackedScripts(normalizedHtml)) {
+    const streamMatches = unpacked.match(directRegex) || [];
+    const validStreams = streamMatches.map((link) => normalizeUrl(link, baseUrl)).filter(Boolean).filter(link => {
+      const l = link.toLowerCase();
+      return !l.includes('analytics')
+        && !l.includes('ads')
+        && !l.includes('test-videos.co.uk')
+        && !l.includes('big_buck_bunny');
+    });
 
-      if (validStreams.length > 0) {
-        return [...new Set(validStreams)][0];
-      }
-    } catch (err) {
-      console.error('Unpacker: Failed to decode script block:', err.message);
+    if (validStreams.length > 0) {
+      return [...new Set(validStreams)][0];
     }
   }
 
@@ -152,15 +170,21 @@ function isFilemoonHost(value) {
   return /(^|\.)filemoon\.(?:sx|to|in|nl|wt|eu|art)$/i.test(getHostname(value));
 }
 
+// voe.sx itself only ever serves a redirect stub; the player lives on a mirror
+// whose domain rotates every few weeks, so no list of them stays accurate. Hosts
+// named here are recognised up front, and everything else falls back to
+// recognising a VOE page by whether its payload decodes (see extractVoeDirectStream).
 function isVoeHost(value) {
   const host = getHostname(value);
-  return /(^|\.)voe\.sx$/i.test(host)
+  return /(^|\.)voe(?:-?un-?bl?o?ck)?\.[a-z]{2,}$/i.test(host)
     || host.includes('pamelachangemission.com');
 }
 
-function isWaawHost(value) {
+// waaw.to, netu.tv and hqq.tv are the same player behind different brands: the
+// same /f/ -> /e/ rewrite and http_referer parameter applies to all of them.
+function isNetuFamilyHost(value) {
   const host = getHostname(value);
-  return /(^|\.)waaw\.to$/i.test(host);
+  return /(^|\.)(?:waaw\d?|netu|netuplayer|hqq\d?)\.(?:to|tv|ac|watch|com|net)$/i.test(host);
 }
 
 function isNuploadHost(value) {
@@ -172,10 +196,59 @@ function isXupalaceHost(value) {
   return /(^|\.)xupalace\.org$/i.test(getHostname(value));
 }
 
-const XUPALACE_LOCKER_SERVERS = new Set([
-  '1fichier', 'fichier', 'mega', 'mediafire', 'uptobox', 'drive',
+const VIDGUARD_HOST_PATTERN = /(^|\.)(?:vidguard\.to|vid-guard\.com|listeamed\.net|bembed\.net|v6embed\.xyz|vgembed\.com|vgfplay\.com|embedv\.net|fslinks\.org|818ing\.com|moviesm4u\.com)$/i;
+
+function isVidguardHost(value) {
+  return VIDGUARD_HOST_PATTERN.test(getHostname(value));
+}
+
+function isMediafireHost(value) {
+  return /(^|\.)mediafire\.com$/i.test(getHostname(value));
+}
+
+/**
+ * Hosts that only serve a player on their /e/ path — a /v/, /f/ or /d/ link is a
+ * landing or download page with no config in it, so following one as-is always
+ * comes back empty.
+ */
+const EMBED_PATH_HOST_PATTERNS = [
+  /(^|\.)(?:ahvsh|streamhide|guccihide|movhide)\.(?:com|to|net|pro)$/i,
+  /(^|\.)(?:luluvdo|lulustream|lulu)\.(?:com|st|to|net)$/i,
+  /(^|\.)vudeo\.(?:io|net|co)$/i,
+  VIDGUARD_HOST_PATTERN
+];
+
+function isEmbedPathHost(value) {
+  const host = getHostname(value);
+  return EMBED_PATH_HOST_PATTERNS.some((pattern) => pattern.test(host));
+}
+
+function toEmbedPathUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const match = parsed.pathname.match(/^\/(?:v|f|d|file|download|embed)\/([^/?#]+)/i);
+    if (!match) return url;
+
+    parsed.pathname = `/e/${match[1]}`;
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+// Lockers that need an account, a captcha or a wait timer. Anything else is worth
+// one attempt: the resolvers below cover most of them, and the generic extractor
+// covers a good share of the rest.
+const FILE_LOCKER_SERVERS = [
+  '1fichier', 'fichier', 'mega', 'uptobox', 'drive',
   'gofile', 'wetransfer', 'terabox', 'pixeldrain', 'zippyshare'
-]);
+];
+
+function isFileLockerServer(server) {
+  const name = (server || '').toLowerCase().trim();
+  if (!name) return false;
+  return FILE_LOCKER_SERVERS.some((locker) => name.includes(locker));
+}
 
 function scoreXupalaceServer(server) {
   const s = (server || '').toLowerCase();
@@ -183,7 +256,9 @@ function scoreXupalaceServer(server) {
   if (s.includes('filemoon')) return 1;
   if (s.includes('dood')) return 2;
   if (s.includes('voe')) return 4;
-  if (s.includes('waaw') || s.includes('netu')) return 5;
+  if (s.includes('vidguard') || s.includes('listeamed')) return 4;
+  if (s.includes('waaw') || s.includes('netu') || s.includes('hqq')) return 5;
+  if (s.includes('lulu') || s.includes('vudeo') || s.includes('ahvsh') || s.includes('streamhide')) return 5;
   return 3;
 }
 
@@ -222,7 +297,7 @@ function extractXupalaceServers(html, baseUrl) {
 async function resolveXupalaceServers(html, baseUrl, userAgent, options) {
   const { depth, visited, signal } = options;
   const servers = extractXupalaceServers(html, baseUrl)
-    .filter((entry) => !XUPALACE_LOCKER_SERVERS.has(entry.server))
+    .filter((entry) => !isFileLockerServer(entry.server))
     .sort((a, b) => scoreXupalaceServer(a.server) - scoreXupalaceServer(b.server));
 
   for (const entry of servers) {
@@ -237,9 +312,7 @@ async function resolveXupalaceServers(html, baseUrl, userAgent, options) {
   return null;
 }
 
-function normalizeWaawEmbedUrl(url, referer) {
-  if (!isWaawHost(url)) return url;
-
+function normalizeNetuEmbedUrl(url, referer) {
   try {
     const parsed = new URL(url);
     const match = parsed.pathname.match(/^\/f\/([^/?#]+)/i);
@@ -253,7 +326,17 @@ function normalizeWaawEmbedUrl(url, referer) {
   }
 }
 
-function extractWaawDirectStream(html, baseUrl) {
+/**
+ * Rewrites a wrapper URL to the path its host actually serves a player on, before
+ * anything is fetched.
+ */
+function normalizeEmbedUrl(url, referer) {
+  if (isNetuFamilyHost(url)) return normalizeNetuEmbedUrl(url, referer);
+  if (isEmbedPathHost(url)) return toEmbedPathUrl(url);
+  return url;
+}
+
+function extractNetuDirectStream(html, baseUrl) {
   const directUrl = extractDirectStream(html, baseUrl);
   if (!directUrl) return null;
 
@@ -272,7 +355,7 @@ function rot13(value) {
   });
 }
 
-function decodeVoePayload(encoded) {
+function decodeVoePayload(encoded, options = {}) {
   try {
     let value = rot13(encoded);
     for (const marker of ['@$', '^^', '~@', '%?', '*~', '!!', '#&']) {
@@ -290,40 +373,170 @@ function decodeVoePayload(encoded) {
     const json = Buffer.from(reversed, 'base64').toString('utf8');
     return JSON.parse(json);
   } catch (error) {
-    console.warn(`Unpacker: VOE payload decode failed: ${error.message}`);
+    // Speculative decodes run against pages that are usually not VOE at all, so a
+    // failure there is the expected outcome and not worth a log line.
+    if (!options.quiet) {
+      console.warn(`Unpacker: VOE payload decode failed: ${error.message}`);
+    }
     return null;
   }
 }
 
-function extractVoeDirectStream(html, baseUrl) {
-  if (!html) return null;
+/**
+ * Collects every string on the page that could be a VOE payload. Mirrors carry it
+ * in an `application/json` script tag; some builds assign it to a plain variable
+ * instead, so both shapes are gathered and left for the decoder to judge.
+ */
+function collectVoeEncodedPayloads(html) {
+  const payloads = [];
+  let match;
 
   const scriptRegex = /<script[^>]+type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/gi;
-  let match;
-  while ((match = scriptRegex.exec(html)) !== null) {
+  while (payloads.length < MAX_VOE_PAYLOADS && (match = scriptRegex.exec(html)) !== null) {
     try {
-      const payload = JSON.parse(match[1].trim());
-      const encoded = Array.isArray(payload) && typeof payload[0] === 'string' ? payload[0] : null;
-      if (!encoded) continue;
-
-      const data = decodeVoePayload(encoded);
-      if (!data) continue;
-
-      const fallback = Array.isArray(data.fallback) ? data.fallback.map((item) => item?.file) : [];
-      const candidates = [
-        data.source,
-        ...fallback,
-        data.direct_access_allowed ? data.direct_access_url : null
-      ].filter(Boolean);
-
-      const direct = candidates.find((candidate) => /\.(?:m3u8|mp4|mkv)(?:$|[?#])/i.test(candidate));
-      if (direct) return normalizeUrl(direct, baseUrl);
+      const parsed = JSON.parse(match[1].trim());
+      const encoded = Array.isArray(parsed)
+        ? parsed.find((item) => typeof item === 'string' && item.length > 0)
+        : null;
+      if (encoded) payloads.push(encoded);
     } catch {
       // Ignore unrelated JSON script tags.
     }
   }
 
+  const varRegex = /(?:var|let|const)\s+[A-Za-z_$][\w$]*\s*=\s*["']([A-Za-z0-9+/=_@$^~%*!#&-]{120,})["']/g;
+  while (payloads.length < MAX_VOE_PAYLOADS && (match = varRegex.exec(html)) !== null) {
+    payloads.push(match[1]);
+  }
+
+  return payloads;
+}
+
+/**
+ * Some builds hand back the stream URL base64-encoded rather than in the clear.
+ */
+function normalizeVoeCandidate(value) {
+  if (typeof value !== 'string' || !value) return null;
+  if (/^https?:\/\//i.test(value)) return value;
+
+  try {
+    const decoded = Buffer.from(value, 'base64').toString('utf8');
+    if (/^https?:\/\//i.test(decoded)) return decoded;
+  } catch {
+    // Not base64; nothing usable here.
+  }
+
   return null;
+}
+
+/**
+ * The decode is self-validating — it only yields JSON with a source field for a
+ * real VOE payload — so this can be run speculatively against a page whose host is
+ * an unrecognised mirror, which in practice is most of them.
+ */
+function extractVoeDirectStream(html, baseUrl, options = {}) {
+  if (!html) return null;
+
+  for (const encoded of collectVoeEncodedPayloads(html)) {
+    const data = decodeVoePayload(encoded, options);
+    if (!data) continue;
+
+    const fallback = Array.isArray(data.fallback) ? data.fallback.map((item) => item?.file) : [];
+    const candidates = [
+      data.source,
+      data.file,
+      data.hls,
+      ...fallback,
+      data.direct_access_allowed ? data.direct_access_url : null
+    ].map(normalizeVoeCandidate).filter(Boolean);
+
+    const direct = candidates.find((candidate) => /\.(?:m3u8|mp4|mkv)(?:$|[?#])/i.test(candidate));
+    if (direct) return normalizeUrl(direct, baseUrl);
+  }
+
+  return null;
+}
+
+/**
+ * VidGuard (listeamed.net and its sibling domains) publishes the stream URL with an
+ * obfuscated `sig` query parameter; the CDN answers 403 until it is decoded. The
+ * transform is fixed: hex pairs XORed with 2, base64-decoded, the trailing five
+ * bytes dropped, reversed, adjacent characters swapped, then five more characters
+ * dropped.
+ */
+function decodeVidguardSignature(streamUrl) {
+  try {
+    const parsed = new URL(streamUrl);
+    const sig = parsed.searchParams.get('sig');
+    if (!sig || sig.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(sig)) return streamUrl;
+
+    let deobfuscated = '';
+    for (let index = 0; index < sig.length; index += 2) {
+      deobfuscated += String.fromCharCode(parseInt(sig.slice(index, index + 2), 16) ^ 2);
+    }
+
+    const bytes = Buffer.from(deobfuscated, 'base64');
+    if (bytes.length <= 10) return streamUrl;
+
+    const characters = Array.from(bytes.subarray(0, bytes.length - 5))
+      .reverse()
+      .map((byte) => String.fromCharCode(byte));
+    for (let index = 0; index + 1 < characters.length; index += 2) {
+      const swap = characters[index];
+      characters[index] = characters[index + 1];
+      characters[index + 1] = swap;
+    }
+
+    parsed.searchParams.set('sig', characters.join('').slice(0, -5));
+    return parsed.toString();
+  } catch (error) {
+    console.warn(`Unpacker: VidGuard signature decode failed: ${error.message}`);
+    return streamUrl;
+  }
+}
+
+function extractVidguardStream(html, baseUrl) {
+  for (const source of [html, ...iterUnpackedScripts(html)]) {
+    if (!source) continue;
+
+    const normalized = source.replace(/\\\//g, '/');
+    const configMatch = normalized.match(/["'](?:stream|hls|file)["']\s*:\s*["']([^"']+)["']/i)
+      || normalized.match(/(https?:\/\/[^\s'"`<>]+[?&]sig=[^\s'"`<>]+)/i);
+    const candidate = normalizeUrl(configMatch?.[1], baseUrl);
+    if (candidate) return decodeVidguardSignature(candidate);
+  }
+
+  return null;
+}
+
+/**
+ * MediaFire serves a landing page, not the file. Cinecalidad's download options are
+ * mostly MediaFire, and handing the landing page URL on as a stream meant every one
+ * of them failed the playability check.
+ */
+function extractMediafireDirectUrl(html, baseUrl) {
+  if (!html) return null;
+
+  const $ = cheerio.load(html);
+  const button = $('#downloadButton').first();
+
+  const href = normalizeUrl(button.attr('href'), baseUrl);
+  if (href && !/(^|\.)mediafire\.com\/file\//i.test(href) && isHttpUrl(href)) {
+    return href;
+  }
+
+  const scrambled = button.attr('data-scrambled-url');
+  if (scrambled) {
+    try {
+      const decoded = Buffer.from(scrambled, 'base64').toString('utf8');
+      if (isHttpUrl(decoded)) return decoded;
+    } catch {
+      // Not base64; fall through to the page scan.
+    }
+  }
+
+  const match = html.match(/https?:\/\/download[^"'`\s<>\\]+\.mediafire\.com\/[^"'`\s<>\\]+/i);
+  return match ? normalizeUrl(match[0], baseUrl) : null;
 }
 
 function extractNuploadDirectStream(html, baseUrl) {
@@ -378,18 +591,14 @@ function extractNuploadDirectStream(html, baseUrl) {
   return null;
 }
 
+/**
+ * embed69 names a server for every link it returns. This used to be a nine-name
+ * allowlist, which silently discarded every link on a host that had since gained a
+ * resolver — and every host the generic extractor would have handled. Anything that
+ * is not an unresolvable locker now gets an attempt, bounded by MAX_EMBED69_ATTEMPTS.
+ */
 function isSupportedEmbedServer(server) {
-  return [
-    'vidhide',
-    'streamwish',
-    'hlswish',
-    'rapidvideo',
-    'filemoon',
-    'dood',
-    'doodstream',
-    'doodstreaming',
-    'voe'
-  ].includes((server || '').toLowerCase());
+  return !isFileLockerServer(server);
 }
 
 const crypto = require('crypto');
@@ -741,7 +950,7 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
         return null;
     }
     visited.add(normalizedInputUrl);
-    url = normalizeWaawEmbedUrl(normalizedInputUrl, referer);
+    url = normalizeEmbedUrl(normalizedInputUrl, referer);
     if (visited.has(url) && url !== normalizedInputUrl) {
         return null;
     }
@@ -782,24 +991,34 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
             if (voeDirectUrl) return voeDirectUrl;
         }
 
-        if (isWaawHost(url)) {
-            const waawDirectUrl = extractWaawDirectStream(html, url);
-            if (waawDirectUrl) return waawDirectUrl;
+        if (isNetuFamilyHost(url)) {
+            const netuDirectUrl = extractNetuDirectStream(html, url);
+            if (netuDirectUrl) return netuDirectUrl;
 
             const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
             const iframeUrl = normalizeUrl(iframeMatch?.[1], url);
-            if (iframeUrl && iframeUrl !== url && isWaawHost(iframeUrl)) {
+            if (iframeUrl && iframeUrl !== url && isNetuFamilyHost(iframeUrl)) {
                 return await resolvePlayerStream(iframeUrl, userAgent, url, { depth: depth + 1, visited, signal });
             }
 
             return null;
         }
 
+        if (isVidguardHost(url)) {
+            const vidguardDirectUrl = extractVidguardStream(html, url);
+            if (vidguardDirectUrl) return vidguardDirectUrl;
+        }
+
+        if (isMediafireHost(url)) {
+            const mediafireDirectUrl = extractMediafireDirectUrl(html, url);
+            if (mediafireDirectUrl) return mediafireDirectUrl;
+        }
+
         if (isNuploadHost(url)) {
             const nuploadDirectUrl = extractNuploadDirectStream(html, url);
             if (nuploadDirectUrl) return nuploadDirectUrl;
         }
-        
+
         // emturbovid / turbovidhls: extract m3u8 from data-hash attribute or urlPlay variable
         if (url.includes('emturbovid') || url.includes('turbovidhls') || url.includes('turboviplay')) {
             const dataHash = html.match(/data-hash=["']([^"']+\.m3u8[^"']*)/);
@@ -825,20 +1044,38 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
                         if (server === 'filemoon') return 2;
                         if (server === 'dood' || server === 'doodstream' || server === 'doodstreaming') return 3;
                         if (server === 'voe') return 5;
+                        if (server === 'vidguard' || server === 'listeamed') return 5;
+                        if (server === 'luluvdo' || server === 'vudeo' || server === 'streamhide') return 6;
+                        if (server === 'netu' || server === 'waaw' || server === 'hqq') return 7;
                         return 2;
                     };
                     return kindScore(a) - kindScore(b) || serverScore(a) - serverScore(b);
                 });
 
+                let attempts = 0;
                 for (const embed of rankedEmbeds) {
-                    if (isSupportedEmbedServer(embed.server)) {
-                        const directUrl = await resolvePlayerStream(embed.url, userAgent, url, { depth: depth + 1, visited, signal });
-                        if (directUrl) return directUrl;
-                    }
+                    if (attempts >= MAX_EMBED69_ATTEMPTS) break;
+                    if (!isSupportedEmbedServer(embed.server)) continue;
+
+                    attempts += 1;
+                    const directUrl = await resolvePlayerStream(embed.url, userAgent, url, { depth: depth + 1, visited, signal });
+                    if (directUrl) return directUrl;
                 }
             }
         }
         
+        // VOE's mirror domains rotate faster than any list of them can be kept
+        // current, so a page that was not recognised by host still gets one
+        // speculative decode. It costs nothing on a non-VOE page: the payload only
+        // yields JSON with a source field if it really is one.
+        if (!isVoeHost(url)) {
+            const voeMirrorUrl = extractVoeDirectStream(html, url, { quiet: true });
+            if (voeMirrorUrl) {
+                console.log(`Unpacker: Recognised ${getHostname(url)} as a VOE mirror by payload`);
+                return voeMirrorUrl;
+            }
+        }
+
         // Check for JS redirect (e.g. VOE initial page)
         const jsRedirectMatch = html.match(/(?:(?:window|self)\.)?location(?:\.href)?\s*=\s*['"]([^'"]+)['"]|(?:(?:window|self)\.)?location\.(?:replace|assign)\s*\(\s*['"]([^'"]+)['"]\s*\)/);
         const redirectUrl = normalizeUrl(jsRedirectMatch?.[1] || jsRedirectMatch?.[2], url);
@@ -865,11 +1102,49 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
     }
 }
 
+/**
+ * Resolves a download-host landing page to the file behind it. Sources that list
+ * download mirrors alongside their players hand back a page URL, which is not
+ * playable and fails validation as HTML; this turns it into the real target where
+ * the host allows it, and returns the input unchanged where it does not.
+ */
+async function resolveDownloadUrl(url, userAgent, referer, options = {}) {
+  if (!isMediafireHost(url)) return url;
+
+  try {
+    const { res, text: html } = await fetchTextWithTimeout(url, {
+      headers: { 'User-Agent': userAgent, 'Referer': referer || url },
+      signal: options.signal
+    }, PLAYER_FETCH_TIMEOUT_MS);
+    if (!res.ok) return url;
+
+    const directUrl = extractMediafireDirectUrl(html, url);
+    if (directUrl) {
+      console.log(`Unpacker: MediaFire resolved ${url} => ${directUrl.substring(0, 80)}...`);
+      return directUrl;
+    }
+  } catch (error) {
+    console.warn(`Unpacker: MediaFire resolve failed for ${url}: ${error.message}`);
+  }
+
+  return url;
+}
+
 module.exports = {
-  __test: { stripPkcs7Padding },
+  __test: {
+    decodeVidguardSignature,
+    extractMediafireDirectUrl,
+    extractVidguardStream,
+    extractVoeDirectStream,
+    isSupportedEmbedServer,
+    iterUnpackedScripts,
+    normalizeEmbedUrl,
+    stripPkcs7Padding
+  },
   decryptEmbed69,
   extractDirectStream,
   extractXupalaceServers,
+  resolveDownloadUrl,
   resolvePelisplus,
   resolvePlayerStream,
   unpack
