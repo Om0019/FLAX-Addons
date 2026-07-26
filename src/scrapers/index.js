@@ -7,6 +7,7 @@ const cuevana3i = require('./cuevana3i');
 const lamovie = require('./lamovie');
 const pelispedia = require('./pelispedia');
 const { fetchTextWithTimeout, normalizeUrl } = require('../http');
+const { hasBlockedIpLiteralHost } = require('../net-guard');
 
 const SCRAPER_TIMEOUT_MS = 10000;
 const SOLOLATINO_TIMEOUT_MS = 12000;
@@ -376,6 +377,14 @@ function sanitizeStream(stream) {
     const parsedUrl = new URL(stream.url);
     if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
       console.log(`Scraper orchestrator: Filtering stream with unsupported protocol: ${stream.url}`);
+      return null;
+    }
+    // A source that has been tampered with could name an internal address here and
+    // have the proxy fetch it on a viewer's behalf. /proxy rejects those too; this
+    // just stops one ever reaching a stream list. Public IP-literal hosts stay
+    // allowed, since some sources legitimately serve streams from bare addresses.
+    if (hasBlockedIpLiteralHost(stream.url)) {
+      console.log(`Scraper orchestrator: Filtering stream pointing at a private address: ${stream.url}`);
       return null;
     }
   } catch {

@@ -1,3 +1,8 @@
+// These fixtures necessarily run their origins on loopback, which the SSRF guard
+// blocks by design, so they opt in explicitly. test_ssrf_guard.js covers the
+// blocking behaviour itself and asserts this flag is off there.
+process.env.ALLOW_PRIVATE_PROXY_TARGETS = '1';
+
 const assert = require('assert');
 const http = require('http');
 const crypto = require('crypto');

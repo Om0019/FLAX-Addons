@@ -4,6 +4,7 @@ const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const scrapers = require('./scrapers');
 const { fetchTextWithTimeout, fetchWithTimeout } = require('./http');
+const { BlockedAddressError, MAX_REDIRECT_HOPS, assertPublicUrl } = require('./net-guard');
 
 const app = express();
 const PROXY_FETCH_TIMEOUT_MS = 8000;
@@ -86,6 +87,66 @@ function isClientDisconnect(error, res) {
     || ['ERR_STREAM_PREMATURE_CLOSE', 'ERR_STREAM_DESTROYED', 'ECONNRESET', 'EPIPE'].includes(error?.code);
 }
 
+class TooManyRedirectsError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'TooManyRedirectsError';
+  }
+}
+
+/**
+ * Fetches `startUrl`, following redirects by hand so that *every* hop is vetted.
+ * Letting fetch follow them would mean only the first URL was ever checked, and a
+ * permitted host answering 302 -> http://169.254.169.254/ would sail straight
+ * through the destination filter.
+ *
+ * `buffer` reads the body inside the request deadline, for playlists that are
+ * going to be buffered and rewritten anyway. It is left off for video, where the
+ * body has to stream and a body deadline would abort playback.
+ */
+async function fetchFollowingRedirects(startUrl, options) {
+  const { headers, buffer, timeoutMs, validate = assertPublicUrl } = options;
+  let resolvedUrl = startUrl;
+
+  for (let hop = 0; ; hop += 1) {
+    await validate(resolvedUrl);
+
+    let upstream;
+    let bufferedManifest = null;
+
+    if (buffer) {
+      ({ res: upstream, text: bufferedManifest } = await fetchTextWithTimeout(resolvedUrl, {
+        headers,
+        redirect: 'manual'
+      }, timeoutMs));
+    } else {
+      upstream = await fetchWithTimeout(resolvedUrl, {
+        headers,
+        redirect: 'manual'
+      }, timeoutMs);
+    }
+
+    const location = upstream.status >= 300 && upstream.status < 400
+      ? upstream.headers.get('location')
+      : null;
+
+    if (!location) {
+      return { upstream, bufferedManifest, resolvedUrl };
+    }
+
+    if (hop >= MAX_REDIRECT_HOPS) {
+      throw new TooManyRedirectsError(`Exceeded ${MAX_REDIRECT_HOPS} redirects from ${startUrl}`);
+    }
+
+    // Discard the redirect body so the connection can be reused.
+    if (upstream.body && !upstream.bodyUsed) {
+      await upstream.body.cancel().catch(() => {});
+    }
+
+    resolvedUrl = new URL(location, resolvedUrl).toString();
+  }
+}
+
 function proxiedStreamUrl(baseUrl, targetUrl, referer) {
   const filename = getProxyFilename(targetUrl);
   return `${baseUrl}/proxy/${filename}?url=${encodeURIComponent(targetUrl)}&referer=${encodeURIComponent(referer || '')}`;
@@ -164,17 +225,6 @@ app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
     return res.status(400).send('Missing url');
   }
 
-  let parsed;
-  try {
-    parsed = new URL(targetUrl);
-  } catch {
-    return res.status(400).send('Invalid url');
-  }
-
-  if (!['http:', 'https:'].includes(parsed.protocol)) {
-    return res.status(400).send('Invalid protocol');
-  }
-
   try {
     const headers = {
       'User-Agent': req.get('user-agent') || DEFAULT_USER_AGENT,
@@ -187,22 +237,11 @@ app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
       headers.Range = range;
     }
 
-    let upstream;
-    let bufferedManifest = null;
-
-    if (requestIsHlsManifest) {
-      // A URL that already looks like a playlist is certain to be buffered and
-      // rewritten below, so the deadline should cover the body as well.
-      ({ res: upstream, text: bufferedManifest } = await fetchTextWithTimeout(targetUrl, {
-        headers
-      }, PROXY_FETCH_TIMEOUT_MS));
-    } else {
-      // Anything else may be a multi-GB video that has to stream for minutes, so
-      // the deadline has to stop at the headers or it would abort playback.
-      upstream = await fetchWithTimeout(targetUrl, {
-        headers
-      }, PROXY_FETCH_TIMEOUT_MS);
-    }
+    const { upstream, bufferedManifest, resolvedUrl } = await fetchFollowingRedirects(targetUrl, {
+      headers,
+      buffer: requestIsHlsManifest,
+      timeoutMs: PROXY_FETCH_TIMEOUT_MS
+    });
 
     const contentType = upstream.headers.get('content-type') || '';
     const contentLength = upstream.headers.get('content-length');
@@ -221,7 +260,7 @@ app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
       // Only reachable unbuffered when the URL gave no hint and the content-type
       // revealed a playlist after the fact.
       const manifestText = bufferedManifest !== null ? bufferedManifest : await upstream.text();
-      res.send(rewriteHlsManifest(manifestText, targetUrl, req));
+      res.send(rewriteHlsManifest(manifestText, resolvedUrl, req));
       return;
     }
 
@@ -241,6 +280,20 @@ app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
     await pipeline(Readable.fromWeb(upstream.body), res);
   } catch (error) {
     if (isClientDisconnect(error, res)) {
+      return;
+    }
+
+    if (error instanceof TooManyRedirectsError) {
+      console.warn('Proxy Stream Error:', error.message);
+      if (!res.headersSent) return res.status(502).send('Too many redirects');
+      res.destroy();
+      return;
+    }
+
+    if (error instanceof BlockedAddressError) {
+      console.warn('Proxy Stream Blocked:', error.message);
+      if (!res.headersSent) return res.status(400).send('Blocked url');
+      res.destroy();
       return;
     }
 
@@ -725,6 +778,7 @@ app.get('/', (req, res) => {
 });
 
 app.__test = {
+  fetchFollowingRedirects,
   shouldProxyStream,
   getProxyFilename,
   isLikelyHlsManifestUrl,
