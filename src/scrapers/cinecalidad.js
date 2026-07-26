@@ -181,7 +181,7 @@ async function waitForPlayerResolvers(playerPromises, streams) {
  * Cinecalidad Scraper (Direct Streams)
  */
 async function scrape(title, originalTitle, year, type, season, episode, options = {}) {
-  const { signal } = options;
+  const { signal, extraTitles = [] } = options;
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   async function performSearch(searchQuery) {
@@ -229,6 +229,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
 
     const cleanTargetTitle = cleanText(title);
     const cleanOriginalTitle = cleanText(originalTitle);
+    const cleanExtraTitles = extraTitles.map(cleanText).filter(Boolean);
     let bestMatch = null;
     let bestScore = -1;
 
@@ -238,14 +239,17 @@ async function scrape(title, originalTitle, year, type, season, episode, options
       const cleanSlug = cleanText(slug.replace(/-/g, ' '));
       const matchesTitle = cleanTargetTitle && (cleanResultTitle.includes(cleanTargetTitle) || cleanTargetTitle.includes(cleanResultTitle));
       const matchesOriginal = cleanOriginalTitle && (cleanResultTitle.includes(cleanOriginalTitle) || cleanOriginalTitle.includes(cleanResultTitle));
+      const matchesExtra = cleanExtraTitles.some((extra) => cleanResultTitle.includes(extra) || extra.includes(cleanResultTitle));
+      const cleanSlugMatchesExtra = cleanExtraTitles.includes(cleanSlug);
 
-      if (matchesTitle || matchesOriginal || cleanSlug === cleanTargetTitle || cleanSlug === cleanOriginalTitle) {
+      if (matchesTitle || matchesOriginal || matchesExtra || cleanSlug === cleanTargetTitle || cleanSlug === cleanOriginalTitle || cleanSlugMatchesExtra) {
         let score = 0;
 
         if (matchesTitle) score += 3;
         if (matchesOriginal) score += 2;
-        if (cleanSlug === cleanTargetTitle || cleanSlug === cleanOriginalTitle) score += 4;
-        if (cleanResultTitle === cleanTargetTitle || cleanResultTitle === cleanOriginalTitle) score += 3;
+        if (matchesExtra) score += 2;
+        if (cleanSlug === cleanTargetTitle || cleanSlug === cleanOriginalTitle || cleanSlugMatchesExtra) score += 4;
+        if (cleanResultTitle === cleanTargetTitle || cleanResultTitle === cleanOriginalTitle || cleanExtraTitles.includes(cleanResultTitle)) score += 3;
 
         if (year) {
           const hasYear = r.title.includes(year.toString()) || cleanResultTitle.includes(year.toString()) || cleanSlug.includes(year.toString());
@@ -267,6 +271,16 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     if (!bestMatch && originalTitle && cleanText(originalTitle) !== cleanText(title)) {
       console.log(`Cinecalidad: No match for "${title}", trying originalTitle "${originalTitle}"`);
       bestMatch = await performSearch(originalTitle);
+    }
+
+    const triedClean = new Set([cleanText(title), cleanText(originalTitle)]);
+    for (const extraTitle of extraTitles) {
+      if (bestMatch) break;
+      const cleanExtra = cleanText(extraTitle);
+      if (!cleanExtra || triedClean.has(cleanExtra)) continue;
+      triedClean.add(cleanExtra);
+      console.log(`Cinecalidad: No match yet, trying alternative title "${extraTitle}"`);
+      bestMatch = await performSearch(extraTitle);
     }
 
     if (!bestMatch) {

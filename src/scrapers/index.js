@@ -323,9 +323,9 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function createScraperTask(scraper, label, args, timeoutMs) {
+function createScraperTask(scraper, label, args, timeoutMs, extraTitles = []) {
   const controller = new AbortController();
-  const promise = scraper.scrape(...args, { signal: controller.signal });
+  const promise = scraper.scrape(...args, { signal: controller.signal, extraTitles });
   return {
     name: label,
     promise: withTimeout(promise, timeoutMs, label, () => controller.abort()),
@@ -613,18 +613,32 @@ async function getStreamsUncached(type, id, season, episode) {
 
     console.log(`Orchestrator matching: "${title}" (${year}), Type: ${type}, Season: ${season}, Episode: ${episode}`);
 
+    // 1b. Widen the title pool with any other Spanish regional dub names
+    // TMDB knows about (sites don't all agree on which one they use).
+    const knownTitles = new Set([cleanComparableTitle(title), cleanComparableTitle(originalTitle)]);
+    const extraTitles = (await tmdb.getAlternativeTitles(type, tmdbId)).filter((candidate) => {
+      const clean = cleanComparableTitle(candidate);
+      if (!clean || knownTitles.has(clean)) return false;
+      knownTitles.add(clean);
+      return true;
+    });
+
+    if (extraTitles.length > 0) {
+      console.log(`Orchestrator: Found ${extraTitles.length} additional Spanish title variant(s): ${extraTitles.join(', ')}`);
+    }
+
     // 2. Invoke scrapers in parallel
     const scraperTasks = [
-      createScraperTask(sololatino, 'SoloLatino', buildScraperArgs('SoloLatino', title, originalTitle, year, type, season, episode), SOLOLATINO_TIMEOUT_MS),
-      createScraperTask(cinecalidad, 'Cinecalidad', buildScraperArgs('Cinecalidad', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS),
-      createScraperTask(tioplus, 'TioPlus', buildScraperArgs('TioPlus', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS),
-      createScraperTask(cuevana3i, 'Cuevana3i', buildScraperArgs('Cuevana3i', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS),
-      createScraperTask(lamovie, 'LaMovie', buildScraperArgs('LaMovie', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS),
-      createScraperTask(pelispedia, 'PelisPedia', buildScraperArgs('PelisPedia', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS)
+      createScraperTask(sololatino, 'SoloLatino', buildScraperArgs('SoloLatino', title, originalTitle, year, type, season, episode), SOLOLATINO_TIMEOUT_MS, extraTitles),
+      createScraperTask(cinecalidad, 'Cinecalidad', buildScraperArgs('Cinecalidad', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
+      createScraperTask(tioplus, 'TioPlus', buildScraperArgs('TioPlus', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
+      createScraperTask(cuevana3i, 'Cuevana3i', buildScraperArgs('Cuevana3i', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
+      createScraperTask(lamovie, 'LaMovie', buildScraperArgs('LaMovie', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
+      createScraperTask(pelispedia, 'PelisPedia', buildScraperArgs('PelisPedia', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles)
     ];
 
     if (ENABLE_CINEHDPLUS) {
-      scraperTasks.push(createScraperTask(cinehdplus, 'CineHDPlus', buildScraperArgs('CineHDPlus', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS));
+      scraperTasks.push(createScraperTask(cinehdplus, 'CineHDPlus', buildScraperArgs('CineHDPlus', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles));
     }
 
     const collection = await collectScraperResults(scraperTasks, SCRAPER_COLLECTION_TIMEOUT_MS);
