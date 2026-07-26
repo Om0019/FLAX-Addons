@@ -80,10 +80,31 @@ async function mapWithConcurrency(items, concurrency, worker) {
 }
 
 async function resolveWithTimeout(url, userAgent, referer, signal) {
-  return Promise.race([
-    unpacker.resolvePlayerStream(url, userAgent, referer, { signal }),
-    new Promise((resolve) => setTimeout(() => resolve(null), PLAYER_RESOLVE_TIMEOUT_MS))
-  ]);
+  let timer;
+  try {
+    return await Promise.race([
+      unpacker.resolvePlayerStream(url, userAgent, referer, { signal }),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), PLAYER_RESOLVE_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Looked up by comparing attribute values rather than by building a selector out
+// of the URL: wrapper URLs carry quotes and brackets that break selector parsing,
+// and a parse error here would abort the whole scrape.
+function findOptionLabel(pageDoc, wrapperUrl) {
+  let label = '';
+  pageDoc('[data-url]').each((_, el) => {
+    if (label) return;
+    if (pageDoc(el).attr('data-url') === wrapperUrl) {
+      label = pageDoc(el).text().trim();
+    }
+  });
+  return label;
 }
 
 function extractWrapperUrls(html) {
@@ -221,7 +242,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
 
     const streams = await mapWithConcurrency(wrapperUrls, PLAYER_CONCURRENCY, async (wrapperUrl, index) => {
       const decodedUrl = decodeWrapperUrl(wrapperUrl);
-      const optionName = pageDoc(`[data-url="${wrapperUrl}"]`).text().trim() || `Opcion ${index + 1}`;
+      const optionName = findOptionLabel(pageDoc, wrapperUrl) || `Opcion ${index + 1}`;
 
       let directUrl = null;
       if (decodedUrl) {
@@ -259,4 +280,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
   }
 }
 
-module.exports = { scrape };
+module.exports = {
+  scrape,
+  __test: { findOptionLabel }
+};

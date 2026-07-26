@@ -484,6 +484,20 @@ async function resolvePelisplus(embedUrl, userAgent, referer, signal) {
   }
 }
 
+/**
+ * Strips PKCS#7 padding from a decrypted string, tolerating a trailing byte that
+ * is not padding at all. A pad of 0 would make slice(0, -0) return the whole
+ * string emptied, and a decrypted block whose last byte happens to exceed the
+ * block size would otherwise cut real content off the end.
+ */
+function stripPkcs7Padding(decrypted) {
+  const pad = decrypted.charCodeAt(decrypted.length - 1);
+  if (!Number.isInteger(pad) || pad < 1 || pad > 16 || pad > decrypted.length) {
+    return decrypted;
+  }
+  return decrypted.slice(0, -pad);
+}
+
 function decryptEmbed69(html) {
   const powChallengeMatch = html.match(/const POW_CHALLENGE = '([^']+)';/);
   const powDifficultyMatch = html.match(/const POW_DIFFICULTY = (\d+);/);
@@ -538,9 +552,9 @@ function decryptEmbed69(html) {
                       const ciphertext = raw.slice(16);
                       const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, iv);
                       decipher.setAutoPadding(false);
-                      let decrypted = decipher.update(ciphertext, undefined, 'utf8') + decipher.final('utf8');
-                      const pad = decrypted.charCodeAt(decrypted.length - 1);
-                      decrypted = decrypted.slice(0, -pad);
+                      const decrypted = stripPkcs7Padding(
+                        decipher.update(ciphertext, undefined, 'utf8') + decipher.final('utf8')
+                      );
                       decryptedLinks.push({ server: embed.servername, url: decrypted, kind: 'video' });
                   } catch (e) {
                       // ignore
@@ -558,9 +572,9 @@ function decryptEmbed69(html) {
                       const ciphertext = raw.slice(16);
                       const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, iv);
                       decipher.setAutoPadding(false);
-                      let decrypted = decipher.update(ciphertext, undefined, 'utf8') + decipher.final('utf8');
-                      const pad = decrypted.charCodeAt(decrypted.length - 1);
-                      decrypted = decrypted.slice(0, -pad);
+                      const decrypted = stripPkcs7Padding(
+                        decipher.update(ciphertext, undefined, 'utf8') + decipher.final('utf8')
+                      );
                       decryptedLinks.push({ server: embed.servername, url: decrypted, kind: 'download' });
                   } catch (e) {
                       // ignore
@@ -852,6 +866,7 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
 }
 
 module.exports = {
+  __test: { stripPkcs7Padding },
   decryptEmbed69,
   extractDirectStream,
   extractXupalaceServers,

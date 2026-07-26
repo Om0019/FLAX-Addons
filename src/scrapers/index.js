@@ -27,10 +27,29 @@ const ENABLE_CINEHDPLUS = false;
 const HOST_HEALTH_TTL_MS = 5 * 60 * 1000;
 const HOST_DEAD_TTL_MS = 3 * 60 * 1000;
 const HOST_HEALTH_MAX_EVENTS = 12;
+// Both maps are keyed by unbounded input — every title ever requested, every host
+// ever seen — and nothing evicted expired entries, so they grew for the life of the
+// process. Sweep on write and cap the total.
+const STREAM_CACHE_MAX_ENTRIES = 500;
+const HOST_HEALTH_MAX_HOSTS = 500;
 
 const streamCache = new Map();
 const inFlightRequests = new Map();
 const hostHealth = new Map();
+
+// Map iterates in insertion order, so re-inserting on write makes the front of the
+// map the least recently written and gives a usable eviction order.
+function pruneExpiring(map, maxEntries, isExpired) {
+  for (const [key, value] of map) {
+    if (isExpired(value)) map.delete(key);
+  }
+
+  while (map.size > maxEntries) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey === undefined) break;
+    map.delete(oldestKey);
+  }
+}
 
 function getStreamHost(stream) {
   try {
@@ -133,7 +152,9 @@ function recordHostHealth(stream, outcome, details = {}) {
     return;
   }
 
+  hostHealth.delete(host);
   hostHealth.set(host, health);
+  pruneExpiring(hostHealth, HOST_HEALTH_MAX_HOSTS, (entry) => entry.expiresAt <= Date.now());
 }
 
 function getHostPenalty(health) {
@@ -273,9 +294,10 @@ async function collectScraperResults(tasks, timeoutMs) {
       && streamCount >= FAST_SOURCE_MIN_STREAMS;
   };
 
+  let fastReturnTimer;
   const fastReturnPromise = new Promise((resolve) => {
     resolveFastReturn = resolve;
-    setTimeout(() => {
+    fastReturnTimer = setTimeout(() => {
       fastReturnEnabled = true;
       if (hasEnoughStreamsForFastReturn()) {
         resolve('enough-streams');
@@ -297,12 +319,18 @@ async function collectScraperResults(tasks, timeoutMs) {
       })
   ));
 
+  let collectionTimer;
   const allCompletePromise = Promise.all(trackedTasks).then(() => 'complete');
   const completionReason = await Promise.race([
     allCompletePromise,
-    new Promise((resolve) => setTimeout(() => resolve('timeout'), timeoutMs)),
+    new Promise((resolve) => {
+      collectionTimer = setTimeout(() => resolve('timeout'), timeoutMs);
+    }),
     fastReturnPromise
   ]);
+
+  clearTimeout(fastReturnTimer);
+  clearTimeout(collectionTimer);
 
   if (pending > 0) {
     const pendingNames = tasks
@@ -714,10 +742,12 @@ async function getStreams(type, id, season, episode) {
 
   const request = getStreamsUncached(type, id, season, episode)
     .then((streams) => {
+      streamCache.delete(key);
       streamCache.set(key, {
         streams,
         expiresAt: Date.now() + (streams.length > 0 ? STREAM_CACHE_TTL_MS : EMPTY_STREAM_CACHE_TTL_MS)
       });
+      pruneExpiring(streamCache, STREAM_CACHE_MAX_ENTRIES, (entry) => entry.expiresAt <= Date.now());
       return streams;
     })
     .finally(() => {
@@ -728,4 +758,7 @@ async function getStreams(type, id, season, episode) {
   return request;
 }
 
-module.exports = { getStreams };
+module.exports = {
+  getStreams,
+  __test: { pruneExpiring, sanitizeStream }
+};

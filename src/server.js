@@ -251,16 +251,28 @@ app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
       || contentType.toLowerCase().includes('mpegurl')
       || contentType.toLowerCase().includes('application/vnd.apple');
 
-    res.status(isHlsManifest ? 200 : upstream.status);
-    res.setHeader('Content-Type', isHlsManifest ? 'application/vnd.apple.mpegurl' : (contentType || 'application/octet-stream'));
+    // Forcing 200 for anything playlist-shaped hid upstream failures: a 404 or a
+    // Cloudflare interstitial on a .m3u8 URL came back as a valid-looking manifest
+    // with the error page rewritten into it. Only rewrite what actually succeeded.
+    const serveAsManifest = isHlsManifest && upstream.ok;
+
+    res.status(serveAsManifest ? 200 : upstream.status);
+    res.setHeader('Content-Type', serveAsManifest ? 'application/vnd.apple.mpegurl' : (contentType || 'application/octet-stream'));
     res.setHeader('Content-Disposition', 'inline');
     res.setHeader('Access-Control-Allow-Origin', '*');
 
-    if (isHlsManifest) {
+    if (serveAsManifest) {
       // Only reachable unbuffered when the URL gave no hint and the content-type
       // revealed a playlist after the fact.
       const manifestText = bufferedManifest !== null ? bufferedManifest : await upstream.text();
       res.send(rewriteHlsManifest(manifestText, resolvedUrl, req));
+      return;
+    }
+
+    if (bufferedManifest !== null) {
+      // Body was already read while probing a playlist URL that turned out to be an
+      // error, so relay it as-is rather than trying to stream a consumed body.
+      res.send(bufferedManifest);
       return;
     }
 
