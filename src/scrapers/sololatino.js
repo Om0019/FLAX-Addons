@@ -1,6 +1,6 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
-const { fetchWithTimeout } = require('../http');
+const { fetchJsonWithTimeout, fetchTextWithTimeout, fetchWithTimeout } = require('../http');
 const TOKEN_CONCURRENCY = 3;
 const SEARCH_TIMEOUT_MS = 4500;
 const PAGE_TIMEOUT_MS = 5500;
@@ -127,7 +127,7 @@ function pageHasRequestedYear(html, year) {
 }
 
 async function probeFallbackCandidate(candidate, year, userAgent, signal) {
-  const probeRes = await fetchWithTimeout(candidate.url, {
+  const { res: probeRes, text: html } = await fetchTextWithTimeout(candidate.url, {
     headers: { 'User-Agent': userAgent },
     signal
   }, PROBE_TIMEOUT_MS);
@@ -135,8 +135,6 @@ async function probeFallbackCandidate(candidate, year, userAgent, signal) {
   if (!probeRes.ok) {
     return null;
   }
-
-  const html = await probeRes.text();
   if (year && !pageHasRequestedYear(html, year)) {
     console.log(`SoloLatino: Rejecting fallback ${candidate.url}; page does not contain requested year ${year}`);
     return null;
@@ -188,13 +186,11 @@ async function scrape(title, originalTitle, year, type, season, episode, options
 
   async function performSearch(searchQuery) {
     const searchUrl = `https://sololatino.net/buscar?q=${encodeURIComponent(searchQuery)}`;
-    const res = await fetchWithTimeout(searchUrl, {
+    const { res, text: html } = await fetchTextWithTimeout(searchUrl, {
       headers: { 'User-Agent': userAgent },
       signal
     }, SEARCH_TIMEOUT_MS);
     if (!res.ok) return null;
-
-    const html = await res.text();
     const $ = cheerio.load(html);
     const results = [];
 
@@ -320,7 +316,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     const cookieString = `XSRF-TOKEN=${xsrfCookieVal}; sololatinonet-session=${sessionCookieVal}`;
 
     // 3. Fetch the actual content page (movie or episode details page) to get the CSRF token and player tokens
-    const pageRes = await fetchWithTimeout(targetPageUrl, {
+    const { res: pageRes, text: pageHtml } = await fetchTextWithTimeout(targetPageUrl, {
       headers: {
         'User-Agent': userAgent
       },
@@ -330,8 +326,6 @@ async function scrape(title, originalTitle, year, type, season, episode, options
       console.warn(`SoloLatino: Failed to fetch target page: ${targetPageUrl} (${pageRes.status})`);
       return [];
     }
-
-    const pageHtml = await pageRes.text();
     const pageDoc = cheerio.load(pageHtml);
 
     // Read the CSRF token from HTML metadata
@@ -360,7 +354,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     // 4. Query the /api/player-url endpoint for each token
     const streams = await mapWithConcurrency(sortedPlayerTokens, TOKEN_CONCURRENCY, async (pInfo) => {
       try {
-        const apiRes = await fetchWithTimeout('https://sololatino.net/api/player-url', {
+        const { res: apiRes, data: apiJson } = await fetchJsonWithTimeout('https://sololatino.net/api/player-url', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -376,7 +370,6 @@ async function scrape(title, originalTitle, year, type, season, episode, options
         }, API_TIMEOUT_MS);
 
         if (apiRes.status === 200) {
-          const apiJson = await apiRes.json();
           if (apiJson && apiJson.url) {
             const streamUrl = apiJson.url;
             const isIframe = apiJson.type === 'iframe' || streamUrl.includes('embed') || streamUrl.includes('player') || streamUrl.includes('/f/');
@@ -387,12 +380,11 @@ async function scrape(title, originalTitle, year, type, season, episode, options
               try {
                 // If it is player.pelisserieshoy.com, perform the s.php handshake to fetch direct streams!
                 if (streamUrl.includes('player.pelisserieshoy.com')) {
-                  const pPageRes = await fetchWithTimeout(streamUrl, {
+                  const { res: pPageRes, text: pHtml } = await fetchTextWithTimeout(streamUrl, {
                     headers: { 'User-Agent': userAgent, 'Referer': 'https://sololatino.net/' },
                     signal
                   }, PAGE_TIMEOUT_MS);
                   if (pPageRes.ok) {
-                    const pHtml = await pPageRes.text();
                     const tokenMatch = pHtml.match(/const\s+_t\s*=\s*['"]([^'"]+)['"]/);
                     if (tokenMatch) {
                       const tToken = tokenMatch[1];
@@ -411,7 +403,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
                       }, API_TIMEOUT_MS);
 
                       // 2. Fetch server list
-                      const sListRes = await fetchWithTimeout('https://player.pelisserieshoy.com/s.php', {
+                      const { res: sListRes, data: sListJson } = await fetchJsonWithTimeout('https://player.pelisserieshoy.com/s.php', {
                         method: 'POST',
                         headers: {
                           'Content-Type': 'application/x-www-form-urlencoded',
@@ -424,12 +416,11 @@ async function scrape(title, originalTitle, year, type, season, episode, options
                       }, API_TIMEOUT_MS);
 
                       if (sListRes.ok) {
-                        const sListJson = await sListRes.json();
                         if (sListJson && sListJson.s && sListJson.s.length > 0) {
                           // Extract first server
                           const [sLabel, sVal] = sListJson.s[0];
                           // 3. Request direct file path
-                          const playValRes = await fetchWithTimeout('https://player.pelisserieshoy.com/s.php', {
+                          const { res: playValRes, data: playValJson } = await fetchJsonWithTimeout('https://player.pelisserieshoy.com/s.php', {
                             method: 'POST',
                             headers: {
                               'Content-Type': 'application/x-www-form-urlencoded',
@@ -442,7 +433,6 @@ async function scrape(title, originalTitle, year, type, season, episode, options
                           }, API_TIMEOUT_MS);
 
                           if (playValRes.ok) {
-                            const playValJson = await playValRes.json();
                             if (playValJson && playValJson.u) {
                               const pathUrl = 'https://player.pelisserieshoy.com' + playValJson.u;
                               // 4. Resolve mediafire/direct redirect location header

@@ -2,7 +2,7 @@
  * Dean Edwards Unpacker Utility
  */
 const cheerio = require('cheerio');
-const { decodeHtmlEntities, fetchTextWithTimeout, fetchWithTimeout, normalizeUrl } = require('./http');
+const { decodeHtmlEntities, fetchTextWithTimeout, normalizeUrl } = require('./http');
 
 const PLAYER_FETCH_TIMEOUT_MS = 5000;
 const PELISPLUS_FETCH_TIMEOUT_MS = 4500;
@@ -446,13 +446,12 @@ async function resolvePelisplus(embedUrl, userAgent, referer, signal) {
     if (!hash) return null;
     
     const apiUrl = `https://${host}/api/v1/video?id=${hash}`;
-    const res = await fetchWithTimeout(apiUrl, {
+    const { res, text: hexData } = await fetchTextWithTimeout(apiUrl, {
       headers: { 'User-Agent': userAgent, 'Referer': referer || embedUrl, 'Origin': `https://${host}` },
       signal
     }, PELISPLUS_FETCH_TIMEOUT_MS);
     if (!res.ok) return null;
     
-    const hexData = await res.text();
     const buf = Buffer.from(hexData.trim(), 'hex');
     
     const decipher = crypto.createDecipheriv('aes-128-cbc', PELISPLUS_KEY, PELISPLUS_IV);
@@ -582,7 +581,7 @@ async function resolveDood(html, url, userAgent, signal) {
   if (!passUrl) return null;
 
   try {
-    const res = await fetchWithTimeout(passUrl, {
+    const { res, text } = await fetchTextWithTimeout(passUrl, {
       headers: {
         'User-Agent': userAgent,
         'Referer': url,
@@ -592,7 +591,7 @@ async function resolveDood(html, url, userAgent, signal) {
     }, DOOD_DIRECT_TIMEOUT_MS);
     if (!res.ok) return null;
 
-    const direct = (await res.text()).trim().replace(/\\\//g, '/');
+    const direct = text.trim().replace(/\\\//g, '/');
     if (/^https?:\/\/.+\.(?:m3u8|mp4|mkv)(?:$|[?#])/i.test(direct)) {
       return direct;
     }

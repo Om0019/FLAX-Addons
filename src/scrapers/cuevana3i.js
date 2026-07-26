@@ -1,6 +1,6 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
-const { fetchWithTimeout } = require('../http');
+const { fetchTextWithTimeout, fetchWithTimeout } = require('../http');
 const PLAYER_CONCURRENCY = 5;
 const PLAYER_RESOLVE_TIMEOUT_MS = 1800;
 const PAGE_TIMEOUT_MS = 5000;
@@ -206,7 +206,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
       ? `${bestMatch.url}/episodio-${season}x${episode}`
       : bestMatch.url;
 
-    const pageRes = await fetchWithTimeout(targetPageUrl, {
+    const { res: pageRes, text: pageHtml } = await fetchTextWithTimeout(targetPageUrl, {
       headers: { 'User-Agent': userAgent },
       signal
     }, PAGE_TIMEOUT_MS);
@@ -214,8 +214,6 @@ async function scrape(title, originalTitle, year, type, season, episode, options
       console.warn(`Cuevana3i: Failed to fetch target page ${targetPageUrl} (${pageRes.status})`);
       return [];
     }
-
-    const pageHtml = await pageRes.text();
     const pageDoc = cheerio.load(pageHtml);
 
     const wrapperUrls = sortWrapperUrls(extractWrapperUrls(pageHtml));

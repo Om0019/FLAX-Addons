@@ -1,3 +1,5 @@
+const { fetchJsonWithTimeout } = require('./http');
+
 const TMDB_API_KEY = 'af3fa2d2239e9d0e6c04a1076d3df76f';
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 const TMDB_TIMEOUT_MS = 5000;
@@ -12,25 +14,18 @@ async function fetchFromTMDB(path, params = {}) {
   });
   
   const url = `${TMDB_BASE_URL}${path}?${queryParams.toString()}`;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), TMDB_TIMEOUT_MS);
 
-  let response;
-  try {
-    response = await fetch(url, { signal: controller.signal });
-  } catch (error) {
-    if (error.name === 'AbortError') {
-      throw new Error(`TMDB API timeout after ${TMDB_TIMEOUT_MS}ms at ${path}`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
+  // The deadline has to span the body too: TMDB returning headers and then
+  // stalling would otherwise hang the whole stream request indefinitely.
+  const { res, data } = await fetchJsonWithTimeout(url, {}, TMDB_TIMEOUT_MS);
 
-  if (!response.ok) {
-    throw new Error(`TMDB API Error: ${response.status} ${response.statusText} at ${path}`);
+  if (!res.ok) {
+    throw new Error(`TMDB API Error: ${res.status} ${res.statusText} at ${path}`);
   }
-  return response.json();
+  if (data === null) {
+    throw new Error(`TMDB API returned an unparseable body at ${path}`);
+  }
+  return data;
 }
 
 /**

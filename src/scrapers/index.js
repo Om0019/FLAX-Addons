@@ -6,7 +6,7 @@ const cinehdplus = require('./cinehdplus');
 const cuevana3i = require('./cuevana3i');
 const lamovie = require('./lamovie');
 const pelispedia = require('./pelispedia');
-const { fetchWithTimeout, normalizeUrl } = require('../http');
+const { fetchTextWithTimeout, normalizeUrl } = require('../http');
 
 const SCRAPER_TIMEOUT_MS = 10000;
 const SOLOLATINO_TIMEOUT_MS = 12000;
@@ -404,7 +404,10 @@ async function isPlayableStream(stream, signal) {
   };
 
   try {
-    const response = await fetchWithTimeout(stream.url, {
+    // The validation probe asks for a 2KB range, so buffering the reply is bounded
+    // and the deadline needs to cover it: a host that stalls mid-body is exactly the
+    // kind we are trying to weed out here.
+    const { res: response, text: body } = await fetchTextWithTimeout(stream.url, {
       method: 'GET',
       headers,
       redirect: 'follow',
@@ -437,7 +440,6 @@ async function isPlayableStream(stream, signal) {
         });
         return false;
       }
-      const body = await response.text();
       const playable = body.includes('#EXTM3U') || body.includes('#EXT-X-STREAM-INF') || body.includes('#EXTINF');
       recordHostHealth(stream, playable ? 'success' : 'soft-fail', {
         status: response.status,

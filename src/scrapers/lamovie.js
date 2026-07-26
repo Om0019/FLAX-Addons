@@ -1,5 +1,5 @@
 const unpacker = require('../unpacker');
-const { fetchWithTimeout } = require('../http');
+const { fetchJsonWithTimeout } = require('../http');
 
 const BASE_URL = 'https://lamovie.org';
 const API_URL = `${BASE_URL}/wp-api/v1`;
@@ -63,13 +63,11 @@ async function search(title, originalTitle, year, type, userAgent, signal, extra
     url.searchParams.set('postsPerPage', '10');
 
     try {
-      const res = await fetchWithTimeout(url.toString(), {
+      const { res, data } = await fetchJsonWithTimeout(url.toString(), {
         headers: { 'User-Agent': userAgent, 'Accept': 'application/json' },
         signal
       }, SEARCH_TIMEOUT_MS);
       if (!res.ok) continue;
-
-      const data = await res.json();
       const posts = Array.isArray(data?.data?.posts) ? data.data.posts : [];
       let bestMatch = null;
       let bestScore = 0;
@@ -101,13 +99,11 @@ async function getEpisodePostId(seriesId, season, episode, userAgent, signal) {
   url.searchParams.set('postsPerPage', '80');
 
   try {
-    const res = await fetchWithTimeout(url.toString(), {
+    const { res, data } = await fetchJsonWithTimeout(url.toString(), {
       headers: { 'User-Agent': userAgent, 'Accept': 'application/json' },
       signal
     }, EPISODES_TIMEOUT_MS);
     if (!res.ok) return null;
-
-    const data = await res.json();
     const posts = Array.isArray(data?.data?.posts) ? data.data.posts : [];
     const match = posts.find((post) => String(post.episode_number || post.episode) === String(episode));
     return match?._id || null;
@@ -160,13 +156,11 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     playerUrl.searchParams.set('postId', postId);
     playerUrl.searchParams.set('demo', '0');
 
-    const playerRes = await fetchWithTimeout(playerUrl.toString(), {
+    const { res: playerRes, data: playerData } = await fetchJsonWithTimeout(playerUrl.toString(), {
       headers: { 'User-Agent': userAgent, 'Accept': 'application/json', 'Referer': BASE_URL },
       signal
     }, PLAYER_TIMEOUT_MS);
     if (!playerRes.ok) return [];
-
-    const playerData = await playerRes.json();
     const embeds = Array.isArray(playerData?.data?.embeds) ? playerData.data.embeds : [];
     console.log(`LaMovie: Found ${embeds.length} embeds for ${match.title}`);
 

@@ -1,6 +1,6 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
-const { fetchWithTimeout } = require('../http');
+const { fetchTextWithTimeout, fetchWithTimeout } = require('../http');
 
 const SEARCH_TIMEOUT_MS = 4500;
 const PAGE_TIMEOUT_MS = 5500;
@@ -103,7 +103,7 @@ async function isPlayableDownloadTarget(url, userAgent, referer, signal) {
 
 async function resolveDownloadPage(downloadPageUrl, userAgent, referer, signal) {
   try {
-    const res = await fetchWithTimeout(downloadPageUrl, {
+    const { res, text: html } = await fetchTextWithTimeout(downloadPageUrl, {
       headers: {
         'User-Agent': userAgent,
         'Referer': referer
@@ -111,8 +111,6 @@ async function resolveDownloadPage(downloadPageUrl, userAgent, referer, signal) 
       signal
     }, PAGE_TIMEOUT_MS);
     if (!res.ok) return null;
-
-    const html = await res.text();
     const matches = [...new Set(html.match(/https?:[^"'`\s<>]+/g) || [])];
 
     return matches.find((url) => {
@@ -186,13 +184,11 @@ async function scrape(title, originalTitle, year, type, season, episode, options
 
   async function performSearch(searchQuery) {
     const searchUrl = `https://www.cinecalidad.am/?s=${encodeURIComponent(searchQuery)}`;
-    const res = await fetchWithTimeout(searchUrl, {
+    const { res, text: html } = await fetchTextWithTimeout(searchUrl, {
       headers: { 'User-Agent': userAgent },
       signal
     }, SEARCH_TIMEOUT_MS);
     if (!res.ok) return null;
-
-    const html = await res.text();
     const $ = cheerio.load(html);
     const results = [];
 
@@ -301,13 +297,11 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     console.log(`Cinecalidad: Matched target page: ${bestMatch.title} (${targetPageUrl})`);
 
     // Fetch movie page to get player tabs
-    const movieRes = await fetchWithTimeout(targetPageUrl, {
+    const { res: movieRes, text: movieHtml } = await fetchTextWithTimeout(targetPageUrl, {
       headers: { 'User-Agent': userAgent },
       signal
     }, PAGE_TIMEOUT_MS);
     if (!movieRes.ok) return [];
-
-    const movieHtml = await movieRes.text();
     const movieDoc = cheerio.load(movieHtml);
 
     const playerOptions = [];

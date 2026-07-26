@@ -3,7 +3,7 @@ const cors = require('cors');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const scrapers = require('./scrapers');
-const { fetchWithTimeout } = require('./http');
+const { fetchTextWithTimeout, fetchWithTimeout } = require('./http');
 
 const app = express();
 const PROXY_FETCH_TIMEOUT_MS = 8000;
@@ -187,9 +187,22 @@ app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
       headers.Range = range;
     }
 
-    const upstream = await fetchWithTimeout(targetUrl, {
-      headers
-    }, PROXY_FETCH_TIMEOUT_MS);
+    let upstream;
+    let bufferedManifest = null;
+
+    if (requestIsHlsManifest) {
+      // A URL that already looks like a playlist is certain to be buffered and
+      // rewritten below, so the deadline should cover the body as well.
+      ({ res: upstream, text: bufferedManifest } = await fetchTextWithTimeout(targetUrl, {
+        headers
+      }, PROXY_FETCH_TIMEOUT_MS));
+    } else {
+      // Anything else may be a multi-GB video that has to stream for minutes, so
+      // the deadline has to stop at the headers or it would abort playback.
+      upstream = await fetchWithTimeout(targetUrl, {
+        headers
+      }, PROXY_FETCH_TIMEOUT_MS);
+    }
 
     const contentType = upstream.headers.get('content-type') || '';
     const contentLength = upstream.headers.get('content-length');
@@ -205,7 +218,9 @@ app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
 
     if (isHlsManifest) {
-      const manifestText = await upstream.text();
+      // Only reachable unbuffered when the URL gave no hint and the content-type
+      // revealed a playlist after the fact.
+      const manifestText = bufferedManifest !== null ? bufferedManifest : await upstream.text();
       res.send(rewriteHlsManifest(manifestText, targetUrl, req));
       return;
     }

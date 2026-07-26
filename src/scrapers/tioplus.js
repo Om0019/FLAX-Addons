@@ -1,6 +1,6 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
-const { fetchWithTimeout } = require('../http');
+const { fetchTextWithTimeout, fetchWithTimeout } = require('../http');
 const TOKEN_CONCURRENCY = 4;
 const SEARCH_TIMEOUT_MS = 4500;
 const PAGE_TIMEOUT_MS = 5500;
@@ -243,7 +243,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
 
   async function performSearch(searchQuery) {
     const searchUrl = `https://tioplus.app/api/search/${encodeURIComponent(searchQuery)}`;
-    const res = await fetchWithTimeout(searchUrl, {
+    const { res, text: html } = await fetchTextWithTimeout(searchUrl, {
       headers: {
         'User-Agent': userAgent,
         'x-requested-with': 'XMLHttpRequest'
@@ -252,8 +252,6 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     }, SEARCH_TIMEOUT_MS);
     console.log(`TioPlus search HTTP status for ${searchQuery}:`, res.status);
     if (!res.ok) return null;
-
-    const html = await res.text();
     const $ = cheerio.load(html);
     const results = [];
 
@@ -337,7 +335,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     console.log(`TioPlus: Matched content URL: ${targetPageUrl}`);
 
     // 2. Fetch target page to extract player server tokens
-    const pageRes = await fetchWithTimeout(targetPageUrl, {
+    const { res: pageRes, text: pageHtml } = await fetchTextWithTimeout(targetPageUrl, {
       headers: { 'User-Agent': userAgent },
       signal
     }, PAGE_TIMEOUT_MS);
@@ -345,8 +343,6 @@ async function scrape(title, originalTitle, year, type, season, episode, options
       console.warn(`TioPlus: Failed to fetch target page: ${targetPageUrl} (${pageRes.status})`);
       return [];
     }
-
-    const pageHtml = await pageRes.text();
     const pageDoc = cheerio.load(pageHtml);
 
     // Collect all data-server and data-tr tokens
@@ -413,7 +409,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
           const playerUrl = `https://tioplus.app/player/${innerPath}`;
 
           // Fetch player page
-          const playerRes = await fetchWithTimeout(playerUrl, {
+          const { res: playerRes, text: playerHtml } = await fetchTextWithTimeout(playerUrl, {
             headers: {
               'User-Agent': userAgent,
               'Referer': 'https://tioplus.app/'
@@ -421,8 +417,6 @@ async function scrape(title, originalTitle, year, type, season, episode, options
             signal: tokenController.signal
           }, PAGE_TIMEOUT_MS);
           if (!playerRes.ok) return null;
-
-          const playerHtml = await playerRes.text();
 
           // Extract redirect URL using Regex
           const redirectMatch = playerHtml.match(/window\.location\.href\s*=\s*['"]([^'"]+)['"]/);

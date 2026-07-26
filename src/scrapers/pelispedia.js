@@ -1,6 +1,6 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
-const { fetchWithTimeout, normalizeUrl } = require('../http');
+const { fetchTextWithTimeout, fetchWithTimeout, normalizeUrl } = require('../http');
 
 const BASE_URL = 'https://pelispedia.mov';
 const SEARCH_TIMEOUT_MS = 5000;
@@ -85,13 +85,11 @@ async function search(title, originalTitle, year, type, userAgent, signal, extra
   for (const query of queries) {
     try {
       const searchUrl = `${BASE_URL}/search?s=${encodeURIComponent(query)}`;
-      const res = await fetchWithTimeout(searchUrl, {
+      const { res, text: html } = await fetchTextWithTimeout(searchUrl, {
         headers: { 'User-Agent': userAgent },
         signal
       }, SEARCH_TIMEOUT_MS);
       if (!res.ok) continue;
-
-      const html = await res.text();
       const $ = cheerio.load(html);
       const results = [];
 
@@ -200,13 +198,13 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     }
 
     let targetUrl = pageUrl;
-    let pageRes = await fetchWithTimeout(targetUrl, {
+    let page = await fetchTextWithTimeout(targetUrl, {
       headers: { 'User-Agent': userAgent },
       signal
     }, PAGE_TIMEOUT_MS);
-    if (!pageRes.ok) return [];
+    if (!page.res.ok) return [];
 
-    let pageHtml = await pageRes.text();
+    let pageHtml = page.text;
     if (type === 'series') {
       const episodeUrl = findEpisodeUrl(pageHtml, pageUrl, season, episode);
       if (!episodeUrl) {
@@ -214,12 +212,12 @@ async function scrape(title, originalTitle, year, type, season, episode, options
         return [];
       }
       targetUrl = episodeUrl;
-      pageRes = await fetchWithTimeout(targetUrl, {
+      page = await fetchTextWithTimeout(targetUrl, {
         headers: { 'User-Agent': userAgent },
         signal
       }, PAGE_TIMEOUT_MS);
-      if (!pageRes.ok) return [];
-      pageHtml = await pageRes.text();
+      if (!page.res.ok) return [];
+      pageHtml = page.text;
     }
 
     const iframeUrls = extractIframeUrls(pageHtml, targetUrl);
