@@ -1,5 +1,7 @@
 const express = require('express');
 const cors = require('cors');
+const { Readable } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
 const scrapers = require('./scrapers');
 const { fetchWithTimeout } = require('./http');
 
@@ -74,6 +76,14 @@ function getProxyFilename(targetUrl) {
   }
 
   return 'stream';
+}
+
+// A player seeking or the user hitting stop tears the response down mid-body.
+// That is routine, not a proxy failure, so it must not be logged as an error or
+// answered with a status the client is no longer there to read.
+function isClientDisconnect(error, res) {
+  return res.destroyed
+    || ['ERR_STREAM_PREMATURE_CLOSE', 'ERR_STREAM_DESTROYED', 'ECONNRESET', 'EPIPE'].includes(error?.code);
 }
 
 function proxiedStreamUrl(baseUrl, targetUrl, referer) {
@@ -208,17 +218,24 @@ app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
       return res.end();
     }
 
-    const reader = upstream.body.getReader();
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      res.write(Buffer.from(value));
+    // pipeline() applies backpressure, so we only pull from the origin as fast as
+    // the client drains us — a manual res.write() loop ignores the return value and
+    // buffers the whole file in memory against a slow player. It also destroys the
+    // upstream stream when the client goes away, so we stop paying for bytes that
+    // no longer have anywhere to go.
+    await pipeline(Readable.fromWeb(upstream.body), res);
+  } catch (error) {
+    if (isClientDisconnect(error, res)) {
+      return;
     }
 
-    res.end();
-  } catch (error) {
     console.error('Proxy Stream Error:', error.message);
+
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
+
     res.status(502).send('Proxy error');
   }
 });
