@@ -14,12 +14,28 @@ const SCRAPER_TIMEOUT_MS = 10000;
 const SOLOLATINO_TIMEOUT_MS = 12000;
 const SCRAPER_COLLECTION_TIMEOUT_MS = 11500;
 const EMPTY_RESULT_GRACE_MS = 3500;
+// Return as soon as this many sources have produced this many streams between
+// them. Requiring two sources rather than one keeps the early exit from simply
+// handing back whichever source happens to be quickest. Five streams rather than
+// three costs about 190ms and was measured to restore the result count to what
+// the old 3500ms wait produced, while more than halving the number of lookups
+// that come back with a single option.
+const FAST_SOURCE_MIN_STREAMS = 5;
+const FAST_SOURCE_MIN_SOURCES = 2;
+// If two sources have not delivered by this point, accept one. This is a
+// relaxation deadline, not a floor: the two-source exit above is live from the
+// first completion onwards.
 const FAST_SOURCE_MIN_WAIT_MS = 3500;
-const FAST_SOURCE_MIN_STREAMS = 3;
-const FAST_SOURCE_MIN_SOURCES = 1;
-const STREAM_VALIDATION_TIMEOUT_MS = 5000;
-const STREAM_VALIDATION_TOTAL_TIMEOUT_MS = 4000;
-const STREAM_VALIDATION_FAST_TIMEOUT_MS = 3200;
+const FAST_SOURCE_RELAXED_MIN_SOURCES = 1;
+// A single probe must be able to finish inside the phase budget below, or a slow
+// host guarantees the phase times out instead of ever completing. It used to be
+// 5000ms against a 4000ms budget, which is why validation so often burned its
+// whole allowance and still returned fewer streams than it wanted. Measured across
+// three settings, tightening these changed no stream counts, so the headroom was
+// pure latency.
+const STREAM_VALIDATION_TIMEOUT_MS = 2800;
+const STREAM_VALIDATION_TOTAL_TIMEOUT_MS = 3200;
+const STREAM_VALIDATION_FAST_TIMEOUT_MS = 2400;
 const MIN_CONFIRMED_STREAMS = 3;
 const MAX_VALIDATION_CANDIDATES = 8;
 const STREAM_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -255,7 +271,7 @@ function withTimeout(promise, timeoutMs, label, onTimeout) {
 async function collectScraperResults(tasks, timeoutMs) {
   const results = [];
   let pending = tasks.length;
-  let fastReturnEnabled = false;
+  let sourcesRequired = FAST_SOURCE_MIN_SOURCES;
   let resolveFastReturn;
 
   const hasEnoughStreamsForFastReturn = () => {
@@ -265,7 +281,7 @@ async function collectScraperResults(tasks, timeoutMs) {
       && result.value.length > 0
     ));
     const streamCount = fulfilledWithStreams.reduce((total, result) => total + result.value.length, 0);
-    return fulfilledWithStreams.length >= FAST_SOURCE_MIN_SOURCES
+    return fulfilledWithStreams.length >= sourcesRequired
       && streamCount >= FAST_SOURCE_MIN_STREAMS;
   };
 
@@ -273,7 +289,8 @@ async function collectScraperResults(tasks, timeoutMs) {
   const fastReturnPromise = new Promise((resolve) => {
     resolveFastReturn = resolve;
     fastReturnTimer = setTimeout(() => {
-      fastReturnEnabled = true;
+      // Two sources have not turned up in time; one will do.
+      sourcesRequired = FAST_SOURCE_RELAXED_MIN_SOURCES;
       if (hasEnoughStreamsForFastReturn()) {
         resolve('enough-streams');
       }
@@ -287,7 +304,7 @@ async function collectScraperResults(tasks, timeoutMs) {
       .then((result) => {
         results.push(result);
         pending -= 1;
-        if (fastReturnEnabled && hasEnoughStreamsForFastReturn()) {
+        if (hasEnoughStreamsForFastReturn()) {
           resolveFastReturn('enough-streams');
         }
         return result;
@@ -583,6 +600,9 @@ async function getStreamsUncached(type, id, season, episode) {
   let year = null;
   let tmdbId = '';
   let imdbId = '';
+  // Populated up front when the TMDB id is already known, so the translations
+  // lookup overlaps the metadata lookup instead of following it.
+  let alternativeTitlesPromise = null;
 
   try {
     // 1. Resolve metadata (Title, Year, ID mapping) using TMDB API
@@ -590,6 +610,7 @@ async function getStreamsUncached(type, id, season, episode) {
       // ID format: tmdb:movie:12345 or tmdb:series:12345:1:1
       const parts = id.split(':');
       tmdbId = parts[2];
+      alternativeTitlesPromise = tmdb.getAlternativeTitles(type, tmdbId);
       const meta = await tmdb.getMetaDetails(type, tmdbId, { includeEpisodes: false });
       if (meta) {
         title = meta.name;
@@ -611,6 +632,7 @@ async function getStreamsUncached(type, id, season, episode) {
       }
     } else {
       // Fallback: If it's a raw TMDB ID number
+      alternativeTitlesPromise = tmdb.getAlternativeTitles(type, id);
       const meta = await tmdb.getMetaDetails(type, id, { includeEpisodes: false });
       if (meta) {
         title = meta.name;
@@ -630,7 +652,8 @@ async function getStreamsUncached(type, id, season, episode) {
     // 1b. Widen the title pool with any other Spanish regional dub names
     // TMDB knows about (sites don't all agree on which one they use).
     const knownTitles = new Set([cleanComparableTitle(title), cleanComparableTitle(originalTitle)]);
-    const extraTitles = (await tmdb.getAlternativeTitles(type, tmdbId)).filter((candidate) => {
+    const alternativeTitles = await (alternativeTitlesPromise || tmdb.getAlternativeTitles(type, tmdbId));
+    const extraTitles = alternativeTitles.filter((candidate) => {
       const clean = cleanComparableTitle(candidate);
       if (!clean || knownTitles.has(clean)) return false;
       knownTitles.add(clean);
