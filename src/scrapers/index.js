@@ -38,6 +38,11 @@ const STREAM_VALIDATION_TOTAL_TIMEOUT_MS = 3200;
 const STREAM_VALIDATION_FAST_TIMEOUT_MS = 2400;
 const MIN_CONFIRMED_STREAMS = 3;
 const MAX_VALIDATION_CANDIDATES = 8;
+// Streams are probed as each source reports in, rather than waiting for every
+// source first. Collection and validation used to run strictly one after the
+// other, so the earliest source's streams sat unchecked until the slowest source
+// finished. Capped so an early source cannot spend the whole budget.
+const MAX_EAGER_VALIDATIONS = 8;
 const STREAM_CACHE_TTL_MS = 10 * 60 * 1000;
 const EMPTY_STREAM_CACHE_TTL_MS = 15 * 1000;
 const ENABLE_CINEHDPLUS = false;
@@ -268,7 +273,7 @@ function withTimeout(promise, timeoutMs, label, onTimeout) {
   });
 }
 
-async function collectScraperResults(tasks, timeoutMs) {
+async function collectScraperResults(tasks, timeoutMs, onResult) {
   const results = [];
   let pending = tasks.length;
   let sourcesRequired = FAST_SOURCE_MIN_SOURCES;
@@ -304,6 +309,13 @@ async function collectScraperResults(tasks, timeoutMs) {
       .then((result) => {
         results.push(result);
         pending -= 1;
+        if (onResult && result.status === 'fulfilled' && Array.isArray(result.value) && result.value.length > 0) {
+          try {
+            onResult(result.value);
+          } catch (error) {
+            console.warn(`Scraper orchestrator: Eager validation hook failed: ${error.message}`);
+          }
+        }
         if (hasEnoughStreamsForFastReturn()) {
           resolveFastReturn('enough-streams');
         }
@@ -505,7 +517,54 @@ async function isPlayableStream(stream, signal) {
   }
 }
 
-async function validatePlayableStreams(streams) {
+/**
+ * Probes streams for playability, at most once per URL. Sharing one of these
+ * across the request lets validation start while sources are still reporting and
+ * still be counted when the final selection is made — the selection asks for a
+ * result and gets one that is already in flight, or already settled.
+ */
+function createStreamValidator(signal) {
+  const byUrl = new Map();
+
+  return {
+    validate(stream) {
+      const existing = byUrl.get(stream.url);
+      if (existing) return existing;
+
+      const probe = isPlayableStream(stream, signal).catch((error) => {
+        console.log(`Scraper orchestrator: Validation task failed for ${stream.url}: ${error.message}`);
+        if (!error.message.startsWith('Fetch aborted:')) {
+          recordHostHealth(stream, 'soft-fail');
+        }
+        return false;
+      });
+
+      byUrl.set(stream.url, probe);
+      return probe;
+    },
+
+    get started() {
+      return byUrl.size;
+    }
+  };
+}
+
+/**
+ * Starts probes for a source's streams as soon as it reports, best-scoring first,
+ * so the work overlaps the sources that have not finished yet.
+ */
+function startEagerValidation(streams, validator) {
+  const candidates = sortStreams(
+    streams.map(sanitizeStream).filter(Boolean).filter((stream) => !shouldSkipHost(stream))
+  );
+
+  for (const stream of candidates) {
+    if (validator.started >= MAX_EAGER_VALIDATIONS) break;
+    validator.validate(stream);
+  }
+}
+
+async function validatePlayableStreams(streams, validator, validationController) {
   const sortedStreams = sortStreams(streams);
   const eligibleStreams = sortedStreams.filter((stream) => !shouldSkipHost(stream));
   const skippedStreams = sortedStreams.filter(shouldSkipHost);
@@ -523,7 +582,6 @@ async function validatePlayableStreams(streams) {
   }
 
   const playableStreams = [];
-  const validationController = new AbortController();
   let completed = 0;
   let resolveEnoughConfirmed;
   let resolveAllComplete;
@@ -536,19 +594,15 @@ async function validatePlayableStreams(streams) {
   });
 
   streamsToValidate.forEach((stream) => {
-    isPlayableStream(stream, validationController.signal)
+    // Already-settled probes resolve immediately; this is where work done during
+    // collection gets picked up rather than repeated.
+    validator.validate(stream)
       .then((playable) => {
         if (playable) {
           playableStreams.push(stream);
           if (playableStreams.length >= MIN_CONFIRMED_STREAMS) {
             resolveEnoughConfirmed('enough-confirmed');
           }
-        }
-      })
-      .catch((error) => {
-        console.log(`Scraper orchestrator: Validation task failed for ${stream.url}: ${error.message}`);
-        if (!error.message.startsWith('Fetch aborted:')) {
-          recordHostHealth(stream, 'soft-fail');
         }
       })
       .finally(() => {
@@ -678,7 +732,17 @@ async function getStreamsUncached(type, id, season, episode) {
       scraperTasks.push(createScraperTask(cinehdplus, 'CineHDPlus', buildScraperArgs('CineHDPlus', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles));
     }
 
-    const collection = await collectScraperResults(scraperTasks, SCRAPER_COLLECTION_TIMEOUT_MS);
+    // One controller and one validator for the whole request, so probes started
+    // while sources are still reporting are the same ones the final selection
+    // waits on, and a single abort cancels them all.
+    const validationController = new AbortController();
+    const validator = createStreamValidator(validationController.signal);
+
+    const collection = await collectScraperResults(
+      scraperTasks,
+      SCRAPER_COLLECTION_TIMEOUT_MS,
+      (streams) => startEagerValidation(streams, validator)
+    );
 
     const countStreams = (results) => results.reduce((total, res) => (
       total + (res.status === 'fulfilled' && Array.isArray(res.value) ? res.value.length : 0)
@@ -715,7 +779,7 @@ async function getStreamsUncached(type, id, season, episode) {
 
     const directStreams = streams.filter((stream) => Boolean(stream?.url));
     const sanitizedStreams = uniqueStreams(directStreams.map(sanitizeStream).filter(Boolean));
-    const playableStreams = await validatePlayableStreams(sanitizedStreams);
+    const playableStreams = await validatePlayableStreams(sanitizedStreams, validator, validationController);
     return sortStreams(playableStreams);
 
   } catch (err) {
@@ -752,5 +816,5 @@ async function getStreams(type, id, season, episode) {
 
 module.exports = {
   getStreams,
-  __test: { sanitizeStream, streamCache, hostHealth }
+  __test: { sanitizeStream, streamCache, hostHealth, createStreamValidator, startEagerValidation }
 };

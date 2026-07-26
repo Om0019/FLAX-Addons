@@ -141,7 +141,50 @@ function testValidationProbeFitsInsideItsBudget() {
   assert.ok(fast <= total, `fast budget (${fast}ms) should not exceed the total budget (${total}ms)`);
 }
 
+// Probes begin as each source reports rather than after all of them, so a URL can
+// be asked about twice — once eagerly, once by the final selection. It must only
+// be fetched once, or overlapping would just double the network work.
+async function testValidatorProbesEachUrlOnce() {
+  const { createStreamValidator } = require('./src/scrapers').__test;
+
+  const realFetch = global.fetch;
+  const fetched = [];
+  global.fetch = async (url) => {
+    fetched.push(String(url));
+    return new Response('#EXTM3U\n#EXTINF:6.0,\nseg.ts\n', {
+      status: 200,
+      headers: { 'Content-Type': 'application/vnd.apple.mpegurl' }
+    });
+  };
+
+  try {
+    const validator = createStreamValidator(new AbortController().signal);
+    const stream = { name: 'S', title: 't', url: 'https://cdn.example/a/master.m3u8' };
+    const other = { name: 'S', title: 't', url: 'https://cdn.example/b/master.m3u8' };
+
+    const [first, second, third] = await Promise.all([
+      validator.validate(stream),
+      validator.validate(stream),
+      validator.validate(other)
+    ]);
+
+    assert.strictEqual(first, second, 'repeat probe returns the same result');
+    assert.strictEqual(typeof third, 'boolean', 'a distinct url is probed on its own');
+    assert.strictEqual(validator.started, 2, 'two distinct urls means two probes');
+
+    const forStream = fetched.filter((u) => u === stream.url);
+    assert.strictEqual(forStream.length, 1, `a url must be fetched once, saw ${forStream.length}`);
+
+    // Asking again after settling must still not refetch.
+    await validator.validate(stream);
+    assert.strictEqual(fetched.filter((u) => u === stream.url).length, 1, 'settled result is reused');
+  } finally {
+    global.fetch = realFetch;
+  }
+}
+
 async function main() {
+  await testValidatorProbesEachUrlOnce();
   await testTwoFastSourcesReturnEarly();
   await testSingleSourceWaitsForRelaxation();
   testValidationProbeFitsInsideItsBudget();
