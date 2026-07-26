@@ -1,6 +1,7 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
 const { fetchTextWithTimeout, fetchWithTimeout } = require('../http');
+const { cleanText, extractCandidateYears } = require('./common');
 const TOKEN_CONCURRENCY = 4;
 const SEARCH_TIMEOUT_MS = 4500;
 const PAGE_TIMEOUT_MS = 5500;
@@ -37,32 +38,12 @@ function sortServerTokens(serverTokens) {
   return [...serverTokens].sort((a, b) => scoreServerToken(a) - scoreServerToken(b));
 }
 
-function cleanText(str) {
-  if (!str) return '';
-  return str
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]/g, '');
-}
 
 function extractSlug(url) {
   const match = url.match(/\/(?:pelicula|serie)\/([^/?#]+)/);
   return match?.[1] || '';
 }
 
-function extractCandidateYears(...values) {
-  const years = new Set();
-
-  for (const value of values) {
-    const matches = String(value || '').match(/\b(?:19|20)\d{2}\b/g) || [];
-    for (const match of matches) {
-      years.add(match);
-    }
-  }
-
-  return years;
-}
 
 function scoreCandidate(result, targetTitle, originalTargetTitle, year, extraTitles = []) {
   const cleanTargetTitle = cleanText(targetTitle);
@@ -137,7 +118,9 @@ function buildFallbackUrls(type, title, originalTitle, extraTitles = []) {
   return candidates;
 }
 
-async function mapWithConcurrency(items, concurrency, worker, options = {}) {
+// Distinct from the shared mapWithConcurrency: this one can return early once
+// enough tokens have resolved, leaving slower ones in flight.
+async function mapWithConcurrencyUntilEnough(items, concurrency, worker, options = {}) {
   const results = [];
   let index = 0;
   let completed = 0;
@@ -267,7 +250,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
         }
       }
     });
-    console.log(`TioPlus performSearch("${searchQuery}") found:`, results);
+    console.log(`TioPlus performSearch("${searchQuery}") found ${results.length} candidate(s)`);
 
     let bestMatch = null;
     let bestScore = 0;
@@ -379,7 +362,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     }
 
     // 3. For each token, resolve player redirect
-    const streams = await mapWithConcurrency(sortedServerTokens, TOKEN_CONCURRENCY, async (sInfo) => {
+    const streams = await mapWithConcurrencyUntilEnough(sortedServerTokens, TOKEN_CONCURRENCY, async (sInfo) => {
       try {
         if (isP2POption(sInfo.name) || isP2POption(sInfo.token)) {
           console.log(`TioPlus: Skipping P2P/torrent server ${sInfo.name}`);

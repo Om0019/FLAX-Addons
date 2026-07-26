@@ -1,20 +1,13 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
 const { fetchJsonWithTimeout, fetchTextWithTimeout, fetchWithTimeout } = require('../http');
+const { cleanText, extractCandidateYears, mapWithConcurrency } = require('./common');
 const TOKEN_CONCURRENCY = 3;
 const SEARCH_TIMEOUT_MS = 4500;
 const PAGE_TIMEOUT_MS = 5500;
 const API_TIMEOUT_MS = 5000;
 const PROBE_TIMEOUT_MS = 2500;
 
-function cleanText(str) {
-  if (!str) return '';
-  return str
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]/g, '');
-}
 
 function slugifyTitle(str) {
   if (!str) return '';
@@ -33,18 +26,6 @@ function extractSlug(url) {
   return match?.[1] || '';
 }
 
-function extractCandidateYears(...values) {
-  const years = new Set();
-
-  for (const value of values) {
-    const matches = String(value || '').match(/\b(?:19|20)\d{2}\b/g) || [];
-    for (const match of matches) {
-      years.add(match);
-    }
-  }
-
-  return years;
-}
 
 function scoreCandidate(result, targetTitle, originalTargetTitle, year, extraTitles = []) {
   const cleanTargetTitle = cleanText(targetTitle);
@@ -156,26 +137,6 @@ function sortPlayerTokens(playerTokens) {
   return [...playerTokens].sort((a, b) => scorePlayerToken(a) - scorePlayerToken(b));
 }
 
-async function mapWithConcurrency(items, concurrency, worker) {
-  const results = [];
-  let index = 0;
-
-  async function runNext() {
-    while (index < items.length) {
-      const currentIndex = index++;
-      const result = await worker(items[currentIndex], currentIndex);
-      if (result) {
-        results.push(result);
-      }
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, items.length) }, () => runNext())
-  );
-
-  return results;
-}
 
 /**
  * SoloLatino Scraper

@@ -1,19 +1,12 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
 const { fetchTextWithTimeout, fetchWithTimeout } = require('../http');
+const { cleanText, mapWithConcurrency } = require('./common');
 const PLAYER_CONCURRENCY = 5;
 const PLAYER_RESOLVE_TIMEOUT_MS = 1800;
 const PAGE_TIMEOUT_MS = 5000;
 const PROBE_TIMEOUT_MS = 2500;
 
-function cleanText(str) {
-  if (!str) return '';
-  return str
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]/g, '');
-}
 
 function slugifyTitle(str, options = {}) {
   if (!str) return '';
@@ -58,26 +51,6 @@ function buildPageCandidates(type, title, originalTitle, extraTitles = []) {
   }));
 }
 
-async function mapWithConcurrency(items, concurrency, worker) {
-  const results = [];
-  let index = 0;
-
-  async function runNext() {
-    while (index < items.length) {
-      const currentIndex = index++;
-      const result = await worker(items[currentIndex], currentIndex);
-      if (result) {
-        results.push(result);
-      }
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, items.length) }, () => runNext())
-  );
-
-  return results;
-}
 
 async function resolveWithTimeout(url, userAgent, referer, signal) {
   let timer;

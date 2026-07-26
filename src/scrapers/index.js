@@ -8,6 +8,7 @@ const lamovie = require('./lamovie');
 const pelispedia = require('./pelispedia');
 const { fetchTextWithTimeout, normalizeUrl } = require('../http');
 const { hasBlockedIpLiteralHost } = require('../net-guard');
+const { createTtlCache } = require('../ttl-cache');
 
 const SCRAPER_TIMEOUT_MS = 10000;
 const SOLOLATINO_TIMEOUT_MS = 12000;
@@ -33,23 +34,9 @@ const HOST_HEALTH_MAX_EVENTS = 12;
 const STREAM_CACHE_MAX_ENTRIES = 500;
 const HOST_HEALTH_MAX_HOSTS = 500;
 
-const streamCache = new Map();
+const streamCache = createTtlCache({ maxEntries: STREAM_CACHE_MAX_ENTRIES });
+const hostHealth = createTtlCache({ maxEntries: HOST_HEALTH_MAX_HOSTS });
 const inFlightRequests = new Map();
-const hostHealth = new Map();
-
-// Map iterates in insertion order, so re-inserting on write makes the front of the
-// map the least recently written and gives a usable eviction order.
-function pruneExpiring(map, maxEntries, isExpired) {
-  for (const [key, value] of map) {
-    if (isExpired(value)) map.delete(key);
-  }
-
-  while (map.size > maxEntries) {
-    const oldestKey = map.keys().next().value;
-    if (oldestKey === undefined) break;
-    map.delete(oldestKey);
-  }
-}
 
 function getStreamHost(stream) {
   try {
@@ -74,22 +61,13 @@ function isKnownBadStream(stream) {
 }
 
 function getHostHealth(host) {
-  const health = hostHealth.get(host);
-  if (!health) return createEmptyHostHealth();
-
-  if (health.expiresAt <= Date.now()) {
-    hostHealth.delete(host);
-    return createEmptyHostHealth();
-  }
-
-  return health;
+  return hostHealth.get(host) || createEmptyHostHealth();
 }
 
 function createEmptyHostHealth() {
   return {
     events: [],
     avgLatencyMs: null,
-    expiresAt: 0,
     deadUntil: 0
   };
 }
@@ -143,7 +121,6 @@ function recordHostHealth(stream, outcome, details = {}) {
   const health = {
     events,
     avgLatencyMs,
-    expiresAt: Date.now() + HOST_HEALTH_TTL_MS,
     deadUntil
   };
 
@@ -152,9 +129,7 @@ function recordHostHealth(stream, outcome, details = {}) {
     return;
   }
 
-  hostHealth.delete(host);
-  hostHealth.set(host, health);
-  pruneExpiring(hostHealth, HOST_HEALTH_MAX_HOSTS, (entry) => entry.expiresAt <= Date.now());
+  hostHealth.set(host, health, HOST_HEALTH_TTL_MS);
 }
 
 function getHostPenalty(health) {
@@ -730,9 +705,9 @@ async function getStreams(type, id, season, episode) {
   const key = [type, id, season || '', episode || ''].join(':');
   const cached = streamCache.get(key);
 
-  if (cached && cached.expiresAt > Date.now()) {
-    console.log(`Scraper orchestrator: Cache hit for ${key} (${cached.streams.length} streams)`);
-    return cached.streams;
+  if (cached) {
+    console.log(`Scraper orchestrator: Cache hit for ${key} (${cached.length} streams)`);
+    return cached;
   }
 
   if (inFlightRequests.has(key)) {
@@ -741,15 +716,9 @@ async function getStreams(type, id, season, episode) {
   }
 
   const request = getStreamsUncached(type, id, season, episode)
-    .then((streams) => {
-      streamCache.delete(key);
-      streamCache.set(key, {
-        streams,
-        expiresAt: Date.now() + (streams.length > 0 ? STREAM_CACHE_TTL_MS : EMPTY_STREAM_CACHE_TTL_MS)
-      });
-      pruneExpiring(streamCache, STREAM_CACHE_MAX_ENTRIES, (entry) => entry.expiresAt <= Date.now());
-      return streams;
-    })
+    .then((streams) => (
+      streamCache.set(key, streams, streams.length > 0 ? STREAM_CACHE_TTL_MS : EMPTY_STREAM_CACHE_TTL_MS)
+    ))
     .finally(() => {
       inFlightRequests.delete(key);
     });
@@ -760,5 +729,5 @@ async function getStreams(type, id, season, episode) {
 
 module.exports = {
   getStreams,
-  __test: { pruneExpiring, sanitizeStream }
+  __test: { sanitizeStream, streamCache, hostHealth }
 };

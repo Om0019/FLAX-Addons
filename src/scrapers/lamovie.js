@@ -1,5 +1,6 @@
 const unpacker = require('../unpacker');
 const { fetchJsonWithTimeout } = require('../http');
+const { cleanText, extractYear, mapWithConcurrency } = require('./common');
 
 const BASE_URL = 'https://lamovie.org';
 const API_URL = `${BASE_URL}/wp-api/v1`;
@@ -8,19 +9,7 @@ const PLAYER_TIMEOUT_MS = 5500;
 const EPISODES_TIMEOUT_MS = 5000;
 const PLAYER_CONCURRENCY = 4;
 
-function cleanText(str) {
-  if (!str) return '';
-  return str
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]/g, '');
-}
 
-function extractYear(value) {
-  const match = String(value || '').match(/\b(?:19|20)\d{2}\b/);
-  return match ? parseInt(match[0], 10) : null;
-}
 
 function scoreCandidate(result, title, originalTitle, year, type, extraTitles = []) {
   if (type === 'movie' && result.type !== 'movies') return 0;
@@ -113,24 +102,6 @@ async function getEpisodePostId(seriesId, season, episode, userAgent, signal) {
   }
 }
 
-async function mapWithConcurrency(items, concurrency, worker) {
-  const results = [];
-  let index = 0;
-
-  async function runNext() {
-    while (index < items.length) {
-      const currentIndex = index++;
-      const result = await worker(items[currentIndex], currentIndex);
-      if (result) results.push(result);
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, items.length) }, () => runNext())
-  );
-
-  return results;
-}
 
 async function scrape(title, originalTitle, year, type, season, episode, options = {}) {
   const { signal, extraTitles = [] } = options;

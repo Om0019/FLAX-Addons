@@ -1,20 +1,13 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
 const { fetchTextWithTimeout, fetchWithTimeout, normalizeUrl } = require('../http');
+const { cleanText, extractYear, mapWithConcurrency } = require('./common');
 
 const BASE_URL = 'https://pelispedia.mov';
 const SEARCH_TIMEOUT_MS = 5000;
 const PAGE_TIMEOUT_MS = 5500;
 const PLAYER_CONCURRENCY = 4;
 
-function cleanText(str) {
-  if (!str) return '';
-  return str
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]/g, '');
-}
 
 function slugifyTitle(str) {
   if (!str) return '';
@@ -27,10 +20,6 @@ function slugifyTitle(str) {
     .replace(/^-+|-+$/g, '');
 }
 
-function extractYear(value) {
-  const match = String(value || '').match(/\b(?:19|20)\d{2}\b/);
-  return match ? parseInt(match[0], 10) : null;
-}
 
 function scoreCandidate(result, title, originalTitle, year, extraTitles = []) {
   const cleanTitle = cleanText(title);
@@ -167,24 +156,6 @@ function findEpisodeUrl(html, pageUrl, season, episode) {
   return match;
 }
 
-async function mapWithConcurrency(items, concurrency, worker) {
-  const results = [];
-  let index = 0;
-
-  async function runNext() {
-    while (index < items.length) {
-      const currentIndex = index++;
-      const result = await worker(items[currentIndex], currentIndex);
-      if (result) results.push(result);
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, items.length) }, () => runNext())
-  );
-
-  return results;
-}
 
 async function scrape(title, originalTitle, year, type, season, episode, options = {}) {
   const { signal, extraTitles = [] } = options;

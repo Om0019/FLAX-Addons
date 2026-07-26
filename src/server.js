@@ -12,7 +12,8 @@ const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Appl
 
 // Enable CORS for Stremio client compatibility
 app.use(cors());
-app.use(express.json());
+// No JSON body parser: every route here is a GET, so parsing request bodies would
+// only add surface without ever being used.
 
 // Declare the Stremio Addon Manifest
 const manifest = {

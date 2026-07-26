@@ -1,6 +1,7 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
 const { fetchTextWithTimeout, fetchWithTimeout } = require('../http');
+const { cleanText } = require('./common');
 
 const SEARCH_TIMEOUT_MS = 4500;
 const PAGE_TIMEOUT_MS = 5500;
@@ -9,14 +10,6 @@ const PLAYER_FAST_MIN_WAIT_MS = 1000;
 const PLAYER_FAST_MIN_STREAMS = 1;
 const PLAYER_COLLECTION_TIMEOUT_MS = 7500;
 
-function cleanText(str) {
-  if (!str) return '';
-  return str
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]/g, '');
-}
 
 function extractSeriesSlug(url) {
   const match = url.match(/\/(?:ver-serie|serie)\/([^/]+)/);

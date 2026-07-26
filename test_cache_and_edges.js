@@ -7,33 +7,110 @@ const cheerio = require('cheerio');
 const app = require('./src/server');
 const { __test: unpackerInternals } = require('./src/unpacker');
 const { __test: orchestratorInternals } = require('./src/scrapers');
+const { createTtlCache } = require('./src/ttl-cache');
 const { __test: cuevanaInternals } = require('./src/scrapers/cuevana3i');
 
 const { stripPkcs7Padding } = unpackerInternals;
-const { pruneExpiring, sanitizeStream } = orchestratorInternals;
+const { sanitizeStream } = orchestratorInternals;
 const { findOptionLabel } = cuevanaInternals;
 
 function testCacheEviction() {
-  const now = Date.now();
-  const map = new Map();
-  const isExpired = (entry) => entry.expiresAt <= now;
+  const cache = createTtlCache({ maxEntries: 3 });
 
-  map.set('fresh', { expiresAt: now + 60000 });
-  map.set('stale', { expiresAt: now - 1 });
-  map.set('alsoStale', { expiresAt: now - 5000 });
+  cache.set('a', 'value-a', 60000);
+  assert.strictEqual(cache.get('a'), 'value-a', 'fresh entry is returned');
 
-  pruneExpiring(map, 100, isExpired);
-  assert.deepStrictEqual([...map.keys()], ['fresh'], 'expired entries are dropped');
+  // Expiry is observed on read, not only on sweep.
+  cache.set('short', 'value-short', 1);
+  const expired = new Promise((resolve) => setTimeout(resolve, 15));
 
   // Unbounded keyspace: without a cap the map grows for the life of the process.
-  const big = new Map();
+  const capped = createTtlCache({ maxEntries: 20 });
   for (let i = 0; i < 50; i += 1) {
-    big.set(`key-${i}`, { expiresAt: now + 60000 });
+    capped.set(`key-${i}`, i, 60000);
   }
-  pruneExpiring(big, 20, isExpired);
-  assert.strictEqual(big.size, 20, 'size is capped');
-  assert.ok(big.has('key-49'), 'newest survives');
-  assert.ok(!big.has('key-0'), 'oldest is evicted first');
+  assert.strictEqual(capped.size, 20, 'size is capped');
+  assert.strictEqual(capped.get('key-49'), 49, 'newest survives');
+  assert.strictEqual(capped.get('key-0'), undefined, 'oldest is evicted first');
+
+  // Re-writing a key refreshes its position, so it is not evicted as if stale.
+  const recency = createTtlCache({ maxEntries: 3 });
+  recency.set('x', 1, 60000);
+  recency.set('y', 2, 60000);
+  recency.set('z', 3, 60000);
+  recency.set('x', 10, 60000);
+  recency.set('w', 4, 60000);
+  assert.strictEqual(recency.get('x'), 10, 're-written key survives eviction');
+  assert.strictEqual(recency.get('y'), undefined, 'least recently written is evicted');
+
+  return expired.then(() => {
+    assert.strictEqual(cache.get('short'), undefined, 'expired entry is not returned');
+  });
+}
+
+// TMDB metadata barely changes, and every uncached stream request paid for two or
+// three round-trips before any scraping began.
+async function testTmdbResponsesAreCached() {
+  const tmdb = require('./src/tmdb');
+  const realFetch = global.fetch;
+  let calls = 0;
+
+  global.fetch = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({
+      id: 1399, name: 'Test Show', original_name: 'Test Show',
+      first_air_date: '2011-04-17', external_ids: { imdb_id: 'tt0944947' },
+      genres: [], credits: { crew: [], cast: [] }
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  try {
+    tmdb.__test.responseCache.clear();
+
+    const first = await tmdb.getMetaDetails('series', '1399', { includeEpisodes: false });
+    assert.strictEqual(calls, 1, 'first lookup hits the network');
+    assert.strictEqual(first.name, 'Test Show');
+
+    const second = await tmdb.getMetaDetails('series', '1399', { includeEpisodes: false });
+    assert.strictEqual(calls, 1, 'repeat lookup is served from cache');
+    assert.deepStrictEqual(second, first, 'cached result matches');
+
+    // A different id must not collide with the cached one.
+    await tmdb.getMetaDetails('series', '1400', { includeEpisodes: false });
+    assert.strictEqual(calls, 2, 'a different key still hits the network');
+  } finally {
+    global.fetch = realFetch;
+    tmdb.__test.responseCache.clear();
+  }
+}
+
+// A failing lookup must not be pinned in the cache for hours.
+async function testTmdbFailuresAreNotCached() {
+  const tmdb = require('./src/tmdb');
+  const realFetch = global.fetch;
+  let calls = 0;
+
+  global.fetch = async () => {
+    calls += 1;
+    if (calls === 1) return new Response('nope', { status: 500 });
+    return new Response(JSON.stringify({ id: 7, title: 'Recovered', release_date: '2024-01-01' }), {
+      status: 200, headers: { 'Content-Type': 'application/json' }
+    });
+  };
+
+  try {
+    tmdb.__test.responseCache.clear();
+
+    const failed = await tmdb.getMetaDetails('movie', '7', { includeEpisodes: false });
+    assert.strictEqual(failed, null, 'a failed lookup returns null');
+
+    const recovered = await tmdb.getMetaDetails('movie', '7', { includeEpisodes: false });
+    assert.strictEqual(calls, 2, 'the failure was retried rather than cached');
+    assert.strictEqual(recovered.name, 'Recovered');
+  } finally {
+    global.fetch = realFetch;
+    tmdb.__test.responseCache.clear();
+  }
 }
 
 function testPkcs7PaddingStrip() {
@@ -153,7 +230,9 @@ async function testUpstreamErrorsAreNotDressedAsManifests() {
 }
 
 async function main() {
-  testCacheEviction();
+  await testCacheEviction();
+  await testTmdbResponsesAreCached();
+  await testTmdbFailuresAreNotCached();
   testPkcs7PaddingStrip();
   testOptionLabelLookup();
   testSanitizeStreamFiltering();

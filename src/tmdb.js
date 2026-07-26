@@ -1,8 +1,16 @@
 const { fetchJsonWithTimeout } = require('./http');
+const { createTtlCache } = require('./ttl-cache');
 
 const TMDB_API_KEY = 'af3fa2d2239e9d0e6c04a1076d3df76f';
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 const TMDB_TIMEOUT_MS = 5000;
+// Every uncached stream request costs two or three TMDB round-trips before any
+// scraping starts, and the answers barely change. Caching them takes that off the
+// critical path for repeat lookups and keeps us well clear of TMDB's rate limit.
+const TMDB_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const TMDB_CACHE_MAX_ENTRIES = 1000;
+
+const responseCache = createTtlCache({ maxEntries: TMDB_CACHE_MAX_ENTRIES });
 
 /**
  * Helper to fetch JSON from TMDB API with optional language fallback.
@@ -15,6 +23,11 @@ async function fetchFromTMDB(path, params = {}) {
   
   const url = `${TMDB_BASE_URL}${path}?${queryParams.toString()}`;
 
+  const cached = responseCache.get(url);
+  if (cached !== undefined) {
+    return cached;
+  }
+
   // The deadline has to span the body too: TMDB returning headers and then
   // stalling would otherwise hang the whole stream request indefinitely.
   const { res, data } = await fetchJsonWithTimeout(url, {}, TMDB_TIMEOUT_MS);
@@ -25,7 +38,10 @@ async function fetchFromTMDB(path, params = {}) {
   if (data === null) {
     throw new Error(`TMDB API returned an unparseable body at ${path}`);
   }
-  return data;
+
+  // Only successful responses are cached; a transient failure must not be pinned
+  // in place for six hours.
+  return responseCache.set(url, data, TMDB_CACHE_TTL_MS);
 }
 
 /**
@@ -70,58 +86,7 @@ async function findByImdbId(imdbId) {
   }
 }
 
-/**
- * Fetches popular/trending content to power Stremio catalogs.
- */
-async function getTrending(type, page = 1) {
-  const tmdbType = type === 'series' ? 'tv' : 'movie';
-  try {
-    const data = await fetchFromTMDB(`/trending/${tmdbType}/week`, {
-      language: 'es-MX',
-      page: page.toString()
-    });
 
-    return (data.results || []).map(item => ({
-      id: `tmdb:${type}:${item.id}`,
-      type,
-      name: item.title || item.name || item.original_title || item.original_name,
-      poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-      background: item.backdrop_path ? `https://image.tmdb.org/t/p/original${item.backdrop_path}` : null,
-      description: item.overview,
-      releaseInfo: (item.release_date || item.first_air_date || '').substring(0, 4)
-    }));
-  } catch (error) {
-    console.error(`Error fetching trending ${type} from TMDB:`, error.message);
-    return [];
-  }
-}
-
-/**
- * Searches TMDB for catalog searches.
- */
-async function searchCatalog(type, query, page = 1) {
-  const tmdbType = type === 'series' ? 'tv' : 'movie';
-  try {
-    const data = await fetchFromTMDB(`/search/${tmdbType}`, {
-      query,
-      language: 'es-MX',
-      page: page.toString()
-    });
-
-    return (data.results || []).map(item => ({
-      id: `tmdb:${type}:${item.id}`,
-      type,
-      name: item.title || item.name || item.original_title || item.original_name,
-      poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-      background: item.backdrop_path ? `https://image.tmdb.org/t/p/original${item.backdrop_path}` : null,
-      description: item.overview,
-      releaseInfo: (item.release_date || item.first_air_date || '').substring(0, 4)
-    }));
-  } catch (error) {
-    console.error(`Error searching catalog ${type} for "${query}":`, error.message);
-    return [];
-  }
-}
 
 /**
  * Gets detailed metadata for an item to respond to /meta.
@@ -226,8 +191,7 @@ async function getAlternativeTitles(type, tmdbId) {
 
 module.exports = {
   findByImdbId,
-  getTrending,
-  searchCatalog,
   getMetaDetails,
-  getAlternativeTitles
+  getAlternativeTitles,
+  __test: { responseCache }
 };
