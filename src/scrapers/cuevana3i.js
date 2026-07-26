@@ -1,19 +1,12 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
-const { fetchWithTimeout } = require('../http');
+const { fetchTextWithTimeout, fetchWithTimeout } = require('../http');
+const { cleanText, mapWithConcurrency } = require('./common');
 const PLAYER_CONCURRENCY = 5;
 const PLAYER_RESOLVE_TIMEOUT_MS = 1800;
 const PAGE_TIMEOUT_MS = 5000;
 const PROBE_TIMEOUT_MS = 2500;
 
-function cleanText(str) {
-  if (!str) return '';
-  return str
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]/g, '');
-}
 
 function slugifyTitle(str, options = {}) {
   if (!str) return '';
@@ -58,32 +51,33 @@ function buildPageCandidates(type, title, originalTitle, extraTitles = []) {
   }));
 }
 
-async function mapWithConcurrency(items, concurrency, worker) {
-  const results = [];
-  let index = 0;
-
-  async function runNext() {
-    while (index < items.length) {
-      const currentIndex = index++;
-      const result = await worker(items[currentIndex], currentIndex);
-      if (result) {
-        results.push(result);
-      }
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, items.length) }, () => runNext())
-  );
-
-  return results;
-}
 
 async function resolveWithTimeout(url, userAgent, referer, signal) {
-  return Promise.race([
-    unpacker.resolvePlayerStream(url, userAgent, referer, { signal }),
-    new Promise((resolve) => setTimeout(() => resolve(null), PLAYER_RESOLVE_TIMEOUT_MS))
-  ]);
+  let timer;
+  try {
+    return await Promise.race([
+      unpacker.resolvePlayerStream(url, userAgent, referer, { signal }),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), PLAYER_RESOLVE_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Looked up by comparing attribute values rather than by building a selector out
+// of the URL: wrapper URLs carry quotes and brackets that break selector parsing,
+// and a parse error here would abort the whole scrape.
+function findOptionLabel(pageDoc, wrapperUrl) {
+  let label = '';
+  pageDoc('[data-url]').each((_, el) => {
+    if (label) return;
+    if (pageDoc(el).attr('data-url') === wrapperUrl) {
+      label = pageDoc(el).text().trim();
+    }
+  });
+  return label;
 }
 
 function extractWrapperUrls(html) {
@@ -206,7 +200,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
       ? `${bestMatch.url}/episodio-${season}x${episode}`
       : bestMatch.url;
 
-    const pageRes = await fetchWithTimeout(targetPageUrl, {
+    const { res: pageRes, text: pageHtml } = await fetchTextWithTimeout(targetPageUrl, {
       headers: { 'User-Agent': userAgent },
       signal
     }, PAGE_TIMEOUT_MS);
@@ -214,8 +208,6 @@ async function scrape(title, originalTitle, year, type, season, episode, options
       console.warn(`Cuevana3i: Failed to fetch target page ${targetPageUrl} (${pageRes.status})`);
       return [];
     }
-
-    const pageHtml = await pageRes.text();
     const pageDoc = cheerio.load(pageHtml);
 
     const wrapperUrls = sortWrapperUrls(extractWrapperUrls(pageHtml));
@@ -223,7 +215,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
 
     const streams = await mapWithConcurrency(wrapperUrls, PLAYER_CONCURRENCY, async (wrapperUrl, index) => {
       const decodedUrl = decodeWrapperUrl(wrapperUrl);
-      const optionName = pageDoc(`[data-url="${wrapperUrl}"]`).text().trim() || `Opcion ${index + 1}`;
+      const optionName = findOptionLabel(pageDoc, wrapperUrl) || `Opcion ${index + 1}`;
 
       let directUrl = null;
       if (decodedUrl) {
@@ -261,4 +253,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
   }
 }
 
-module.exports = { scrape };
+module.exports = {
+  scrape,
+  __test: { findOptionLabel }
+};

@@ -1,6 +1,7 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
-const { fetchWithTimeout } = require('../http');
+const { fetchTextWithTimeout, fetchWithTimeout } = require('../http');
+const { cleanText, extractCandidateYears } = require('./common');
 const TOKEN_CONCURRENCY = 4;
 const SEARCH_TIMEOUT_MS = 4500;
 const PAGE_TIMEOUT_MS = 5500;
@@ -37,32 +38,12 @@ function sortServerTokens(serverTokens) {
   return [...serverTokens].sort((a, b) => scoreServerToken(a) - scoreServerToken(b));
 }
 
-function cleanText(str) {
-  if (!str) return '';
-  return str
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]/g, '');
-}
 
 function extractSlug(url) {
   const match = url.match(/\/(?:pelicula|serie)\/([^/?#]+)/);
   return match?.[1] || '';
 }
 
-function extractCandidateYears(...values) {
-  const years = new Set();
-
-  for (const value of values) {
-    const matches = String(value || '').match(/\b(?:19|20)\d{2}\b/g) || [];
-    for (const match of matches) {
-      years.add(match);
-    }
-  }
-
-  return years;
-}
 
 function scoreCandidate(result, targetTitle, originalTargetTitle, year, extraTitles = []) {
   const cleanTargetTitle = cleanText(targetTitle);
@@ -137,7 +118,9 @@ function buildFallbackUrls(type, title, originalTitle, extraTitles = []) {
   return candidates;
 }
 
-async function mapWithConcurrency(items, concurrency, worker, options = {}) {
+// Distinct from the shared mapWithConcurrency: this one can return early once
+// enough tokens have resolved, leaving slower ones in flight.
+async function mapWithConcurrencyUntilEnough(items, concurrency, worker, options = {}) {
   const results = [];
   let index = 0;
   let completed = 0;
@@ -217,6 +200,26 @@ async function mapWithConcurrency(items, concurrency, worker, options = {}) {
 }
 
 /**
+ * TioPlus takes the query as a URL path segment, and two characters break it
+ * regardless of encoding. A plain apostrophe returns HTTP 500 (%27 fails too, so
+ * their server unescapes before choking on it) and a slash returns 404 even as
+ * %2F. Both are silent losses: the search attempt is spent and nothing comes back.
+ * Dropping the apostrophe and spacing out the slash turns both into working
+ * queries — "Schindler's List" and "Face/Off" each go from 0 hits to 1.
+ *
+ * A curly apostrophe is fine and is left alone. This only shapes the outgoing
+ * query; matching still scores against the real title, and cleanText discards
+ * punctuation anyway, so nothing downstream is affected.
+ */
+function toSearchQuery(value) {
+  return String(value || '')
+    .replace(/'/g, '')
+    .replace(/\//g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * Decodes base64 string to UTF-8.
  */
 function b64_to_utf8(str) {
@@ -242,8 +245,8 @@ async function scrape(title, originalTitle, year, type, season, episode, options
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   async function performSearch(searchQuery) {
-    const searchUrl = `https://tioplus.app/api/search/${encodeURIComponent(searchQuery)}`;
-    const res = await fetchWithTimeout(searchUrl, {
+    const searchUrl = `https://tioplus.app/api/search/${encodeURIComponent(toSearchQuery(searchQuery))}`;
+    const { res, text: html } = await fetchTextWithTimeout(searchUrl, {
       headers: {
         'User-Agent': userAgent,
         'x-requested-with': 'XMLHttpRequest'
@@ -252,8 +255,6 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     }, SEARCH_TIMEOUT_MS);
     console.log(`TioPlus search HTTP status for ${searchQuery}:`, res.status);
     if (!res.ok) return null;
-
-    const html = await res.text();
     const $ = cheerio.load(html);
     const results = [];
 
@@ -269,7 +270,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
         }
       }
     });
-    console.log(`TioPlus performSearch("${searchQuery}") found:`, results);
+    console.log(`TioPlus performSearch("${searchQuery}") found ${results.length} candidate(s)`);
 
     let bestMatch = null;
     let bestScore = 0;
@@ -337,7 +338,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     console.log(`TioPlus: Matched content URL: ${targetPageUrl}`);
 
     // 2. Fetch target page to extract player server tokens
-    const pageRes = await fetchWithTimeout(targetPageUrl, {
+    const { res: pageRes, text: pageHtml } = await fetchTextWithTimeout(targetPageUrl, {
       headers: { 'User-Agent': userAgent },
       signal
     }, PAGE_TIMEOUT_MS);
@@ -345,8 +346,6 @@ async function scrape(title, originalTitle, year, type, season, episode, options
       console.warn(`TioPlus: Failed to fetch target page: ${targetPageUrl} (${pageRes.status})`);
       return [];
     }
-
-    const pageHtml = await pageRes.text();
     const pageDoc = cheerio.load(pageHtml);
 
     // Collect all data-server and data-tr tokens
@@ -383,7 +382,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     }
 
     // 3. For each token, resolve player redirect
-    const streams = await mapWithConcurrency(sortedServerTokens, TOKEN_CONCURRENCY, async (sInfo) => {
+    const streams = await mapWithConcurrencyUntilEnough(sortedServerTokens, TOKEN_CONCURRENCY, async (sInfo) => {
       try {
         if (isP2POption(sInfo.name) || isP2POption(sInfo.token)) {
           console.log(`TioPlus: Skipping P2P/torrent server ${sInfo.name}`);
@@ -413,7 +412,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
           const playerUrl = `https://tioplus.app/player/${innerPath}`;
 
           // Fetch player page
-          const playerRes = await fetchWithTimeout(playerUrl, {
+          const { res: playerRes, text: playerHtml } = await fetchTextWithTimeout(playerUrl, {
             headers: {
               'User-Agent': userAgent,
               'Referer': 'https://tioplus.app/'
@@ -421,8 +420,6 @@ async function scrape(title, originalTitle, year, type, season, episode, options
             signal: tokenController.signal
           }, PAGE_TIMEOUT_MS);
           if (!playerRes.ok) return null;
-
-          const playerHtml = await playerRes.text();
 
           // Extract redirect URL using Regex
           const redirectMatch = playerHtml.match(/window\.location\.href\s*=\s*['"]([^'"]+)['"]/);
@@ -478,4 +475,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
   }
 }
 
-module.exports = { scrape };
+module.exports = {
+  scrape,
+  __test: { toSearchQuery }
+};

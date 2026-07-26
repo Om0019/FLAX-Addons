@@ -6,30 +6,58 @@ const cinehdplus = require('./cinehdplus');
 const cuevana3i = require('./cuevana3i');
 const lamovie = require('./lamovie');
 const pelispedia = require('./pelispedia');
-const { fetchWithTimeout, normalizeUrl } = require('../http');
+const { fetchTextWithTimeout, normalizeUrl } = require('../http');
+const { hasBlockedIpLiteralHost } = require('../net-guard');
+const { createTtlCache } = require('../ttl-cache');
 
 const SCRAPER_TIMEOUT_MS = 10000;
 const SOLOLATINO_TIMEOUT_MS = 12000;
 const SCRAPER_COLLECTION_TIMEOUT_MS = 11500;
 const EMPTY_RESULT_GRACE_MS = 3500;
+// Return as soon as this many sources have produced this many streams between
+// them. Requiring two sources rather than one keeps the early exit from simply
+// handing back whichever source happens to be quickest. Five streams rather than
+// three costs about 190ms and was measured to restore the result count to what
+// the old 3500ms wait produced, while more than halving the number of lookups
+// that come back with a single option.
+const FAST_SOURCE_MIN_STREAMS = 5;
+const FAST_SOURCE_MIN_SOURCES = 2;
+// If two sources have not delivered by this point, accept one. This is a
+// relaxation deadline, not a floor: the two-source exit above is live from the
+// first completion onwards.
 const FAST_SOURCE_MIN_WAIT_MS = 3500;
-const FAST_SOURCE_MIN_STREAMS = 3;
-const FAST_SOURCE_MIN_SOURCES = 1;
-const STREAM_VALIDATION_TIMEOUT_MS = 5000;
-const STREAM_VALIDATION_TOTAL_TIMEOUT_MS = 4000;
-const STREAM_VALIDATION_FAST_TIMEOUT_MS = 3200;
+const FAST_SOURCE_RELAXED_MIN_SOURCES = 1;
+// A single probe must be able to finish inside the phase budget below, or a slow
+// host guarantees the phase times out instead of ever completing. It used to be
+// 5000ms against a 4000ms budget, which is why validation so often burned its
+// whole allowance and still returned fewer streams than it wanted. Measured across
+// three settings, tightening these changed no stream counts, so the headroom was
+// pure latency.
+const STREAM_VALIDATION_TIMEOUT_MS = 2800;
+const STREAM_VALIDATION_TOTAL_TIMEOUT_MS = 3200;
+const STREAM_VALIDATION_FAST_TIMEOUT_MS = 2400;
 const MIN_CONFIRMED_STREAMS = 3;
 const MAX_VALIDATION_CANDIDATES = 8;
+// Streams are probed as each source reports in, rather than waiting for every
+// source first. Collection and validation used to run strictly one after the
+// other, so the earliest source's streams sat unchecked until the slowest source
+// finished. Capped so an early source cannot spend the whole budget.
+const MAX_EAGER_VALIDATIONS = 8;
 const STREAM_CACHE_TTL_MS = 10 * 60 * 1000;
 const EMPTY_STREAM_CACHE_TTL_MS = 15 * 1000;
 const ENABLE_CINEHDPLUS = false;
 const HOST_HEALTH_TTL_MS = 5 * 60 * 1000;
 const HOST_DEAD_TTL_MS = 3 * 60 * 1000;
 const HOST_HEALTH_MAX_EVENTS = 12;
+// Both maps are keyed by unbounded input — every title ever requested, every host
+// ever seen — and nothing evicted expired entries, so they grew for the life of the
+// process. Sweep on write and cap the total.
+const STREAM_CACHE_MAX_ENTRIES = 500;
+const HOST_HEALTH_MAX_HOSTS = 500;
 
-const streamCache = new Map();
+const streamCache = createTtlCache({ maxEntries: STREAM_CACHE_MAX_ENTRIES });
+const hostHealth = createTtlCache({ maxEntries: HOST_HEALTH_MAX_HOSTS });
 const inFlightRequests = new Map();
-const hostHealth = new Map();
 
 function getStreamHost(stream) {
   try {
@@ -54,22 +82,13 @@ function isKnownBadStream(stream) {
 }
 
 function getHostHealth(host) {
-  const health = hostHealth.get(host);
-  if (!health) return createEmptyHostHealth();
-
-  if (health.expiresAt <= Date.now()) {
-    hostHealth.delete(host);
-    return createEmptyHostHealth();
-  }
-
-  return health;
+  return hostHealth.get(host) || createEmptyHostHealth();
 }
 
 function createEmptyHostHealth() {
   return {
     events: [],
     avgLatencyMs: null,
-    expiresAt: 0,
     deadUntil: 0
   };
 }
@@ -123,7 +142,6 @@ function recordHostHealth(stream, outcome, details = {}) {
   const health = {
     events,
     avgLatencyMs,
-    expiresAt: Date.now() + HOST_HEALTH_TTL_MS,
     deadUntil
   };
 
@@ -132,7 +150,7 @@ function recordHostHealth(stream, outcome, details = {}) {
     return;
   }
 
-  hostHealth.set(host, health);
+  hostHealth.set(host, health, HOST_HEALTH_TTL_MS);
 }
 
 function getHostPenalty(health) {
@@ -255,10 +273,10 @@ function withTimeout(promise, timeoutMs, label, onTimeout) {
   });
 }
 
-async function collectScraperResults(tasks, timeoutMs) {
+async function collectScraperResults(tasks, timeoutMs, onResult) {
   const results = [];
   let pending = tasks.length;
-  let fastReturnEnabled = false;
+  let sourcesRequired = FAST_SOURCE_MIN_SOURCES;
   let resolveFastReturn;
 
   const hasEnoughStreamsForFastReturn = () => {
@@ -268,14 +286,16 @@ async function collectScraperResults(tasks, timeoutMs) {
       && result.value.length > 0
     ));
     const streamCount = fulfilledWithStreams.reduce((total, result) => total + result.value.length, 0);
-    return fulfilledWithStreams.length >= FAST_SOURCE_MIN_SOURCES
+    return fulfilledWithStreams.length >= sourcesRequired
       && streamCount >= FAST_SOURCE_MIN_STREAMS;
   };
 
+  let fastReturnTimer;
   const fastReturnPromise = new Promise((resolve) => {
     resolveFastReturn = resolve;
-    setTimeout(() => {
-      fastReturnEnabled = true;
+    fastReturnTimer = setTimeout(() => {
+      // Two sources have not turned up in time; one will do.
+      sourcesRequired = FAST_SOURCE_RELAXED_MIN_SOURCES;
       if (hasEnoughStreamsForFastReturn()) {
         resolve('enough-streams');
       }
@@ -289,19 +309,32 @@ async function collectScraperResults(tasks, timeoutMs) {
       .then((result) => {
         results.push(result);
         pending -= 1;
-        if (fastReturnEnabled && hasEnoughStreamsForFastReturn()) {
+        if (onResult && result.status === 'fulfilled' && Array.isArray(result.value) && result.value.length > 0) {
+          try {
+            onResult(result.value);
+          } catch (error) {
+            console.warn(`Scraper orchestrator: Eager validation hook failed: ${error.message}`);
+          }
+        }
+        if (hasEnoughStreamsForFastReturn()) {
           resolveFastReturn('enough-streams');
         }
         return result;
       })
   ));
 
+  let collectionTimer;
   const allCompletePromise = Promise.all(trackedTasks).then(() => 'complete');
   const completionReason = await Promise.race([
     allCompletePromise,
-    new Promise((resolve) => setTimeout(() => resolve('timeout'), timeoutMs)),
+    new Promise((resolve) => {
+      collectionTimer = setTimeout(() => resolve('timeout'), timeoutMs);
+    }),
     fastReturnPromise
   ]);
+
+  clearTimeout(fastReturnTimer);
+  clearTimeout(collectionTimer);
 
   if (pending > 0) {
     const pendingNames = tasks
@@ -378,6 +411,14 @@ function sanitizeStream(stream) {
       console.log(`Scraper orchestrator: Filtering stream with unsupported protocol: ${stream.url}`);
       return null;
     }
+    // A source that has been tampered with could name an internal address here and
+    // have the proxy fetch it on a viewer's behalf. /proxy rejects those too; this
+    // just stops one ever reaching a stream list. Public IP-literal hosts stay
+    // allowed, since some sources legitimately serve streams from bare addresses.
+    if (hasBlockedIpLiteralHost(stream.url)) {
+      console.log(`Scraper orchestrator: Filtering stream pointing at a private address: ${stream.url}`);
+      return null;
+    }
   } catch {
     console.log(`Scraper orchestrator: Filtering stream with invalid URL: ${stream.url}`);
     return null;
@@ -404,7 +445,10 @@ async function isPlayableStream(stream, signal) {
   };
 
   try {
-    const response = await fetchWithTimeout(stream.url, {
+    // The validation probe asks for a 2KB range, so buffering the reply is bounded
+    // and the deadline needs to cover it: a host that stalls mid-body is exactly the
+    // kind we are trying to weed out here.
+    const { res: response, text: body } = await fetchTextWithTimeout(stream.url, {
       method: 'GET',
       headers,
       redirect: 'follow',
@@ -437,7 +481,6 @@ async function isPlayableStream(stream, signal) {
         });
         return false;
       }
-      const body = await response.text();
       const playable = body.includes('#EXTM3U') || body.includes('#EXT-X-STREAM-INF') || body.includes('#EXTINF');
       recordHostHealth(stream, playable ? 'success' : 'soft-fail', {
         status: response.status,
@@ -474,7 +517,54 @@ async function isPlayableStream(stream, signal) {
   }
 }
 
-async function validatePlayableStreams(streams) {
+/**
+ * Probes streams for playability, at most once per URL. Sharing one of these
+ * across the request lets validation start while sources are still reporting and
+ * still be counted when the final selection is made — the selection asks for a
+ * result and gets one that is already in flight, or already settled.
+ */
+function createStreamValidator(signal) {
+  const byUrl = new Map();
+
+  return {
+    validate(stream) {
+      const existing = byUrl.get(stream.url);
+      if (existing) return existing;
+
+      const probe = isPlayableStream(stream, signal).catch((error) => {
+        console.log(`Scraper orchestrator: Validation task failed for ${stream.url}: ${error.message}`);
+        if (!error.message.startsWith('Fetch aborted:')) {
+          recordHostHealth(stream, 'soft-fail');
+        }
+        return false;
+      });
+
+      byUrl.set(stream.url, probe);
+      return probe;
+    },
+
+    get started() {
+      return byUrl.size;
+    }
+  };
+}
+
+/**
+ * Starts probes for a source's streams as soon as it reports, best-scoring first,
+ * so the work overlaps the sources that have not finished yet.
+ */
+function startEagerValidation(streams, validator) {
+  const candidates = sortStreams(
+    streams.map(sanitizeStream).filter(Boolean).filter((stream) => !shouldSkipHost(stream))
+  );
+
+  for (const stream of candidates) {
+    if (validator.started >= MAX_EAGER_VALIDATIONS) break;
+    validator.validate(stream);
+  }
+}
+
+async function validatePlayableStreams(streams, validator, validationController) {
   const sortedStreams = sortStreams(streams);
   const eligibleStreams = sortedStreams.filter((stream) => !shouldSkipHost(stream));
   const skippedStreams = sortedStreams.filter(shouldSkipHost);
@@ -492,7 +582,6 @@ async function validatePlayableStreams(streams) {
   }
 
   const playableStreams = [];
-  const validationController = new AbortController();
   let completed = 0;
   let resolveEnoughConfirmed;
   let resolveAllComplete;
@@ -505,19 +594,15 @@ async function validatePlayableStreams(streams) {
   });
 
   streamsToValidate.forEach((stream) => {
-    isPlayableStream(stream, validationController.signal)
+    // Already-settled probes resolve immediately; this is where work done during
+    // collection gets picked up rather than repeated.
+    validator.validate(stream)
       .then((playable) => {
         if (playable) {
           playableStreams.push(stream);
           if (playableStreams.length >= MIN_CONFIRMED_STREAMS) {
             resolveEnoughConfirmed('enough-confirmed');
           }
-        }
-      })
-      .catch((error) => {
-        console.log(`Scraper orchestrator: Validation task failed for ${stream.url}: ${error.message}`);
-        if (!error.message.startsWith('Fetch aborted:')) {
-          recordHostHealth(stream, 'soft-fail');
         }
       })
       .finally(() => {
@@ -569,6 +654,9 @@ async function getStreamsUncached(type, id, season, episode) {
   let year = null;
   let tmdbId = '';
   let imdbId = '';
+  // Populated up front when the TMDB id is already known, so the translations
+  // lookup overlaps the metadata lookup instead of following it.
+  let alternativeTitlesPromise = null;
 
   try {
     // 1. Resolve metadata (Title, Year, ID mapping) using TMDB API
@@ -576,6 +664,7 @@ async function getStreamsUncached(type, id, season, episode) {
       // ID format: tmdb:movie:12345 or tmdb:series:12345:1:1
       const parts = id.split(':');
       tmdbId = parts[2];
+      alternativeTitlesPromise = tmdb.getAlternativeTitles(type, tmdbId);
       const meta = await tmdb.getMetaDetails(type, tmdbId, { includeEpisodes: false });
       if (meta) {
         title = meta.name;
@@ -597,6 +686,7 @@ async function getStreamsUncached(type, id, season, episode) {
       }
     } else {
       // Fallback: If it's a raw TMDB ID number
+      alternativeTitlesPromise = tmdb.getAlternativeTitles(type, id);
       const meta = await tmdb.getMetaDetails(type, id, { includeEpisodes: false });
       if (meta) {
         title = meta.name;
@@ -616,7 +706,8 @@ async function getStreamsUncached(type, id, season, episode) {
     // 1b. Widen the title pool with any other Spanish regional dub names
     // TMDB knows about (sites don't all agree on which one they use).
     const knownTitles = new Set([cleanComparableTitle(title), cleanComparableTitle(originalTitle)]);
-    const extraTitles = (await tmdb.getAlternativeTitles(type, tmdbId)).filter((candidate) => {
+    const alternativeTitles = await (alternativeTitlesPromise || tmdb.getAlternativeTitles(type, tmdbId));
+    const extraTitles = alternativeTitles.filter((candidate) => {
       const clean = cleanComparableTitle(candidate);
       if (!clean || knownTitles.has(clean)) return false;
       knownTitles.add(clean);
@@ -641,7 +732,17 @@ async function getStreamsUncached(type, id, season, episode) {
       scraperTasks.push(createScraperTask(cinehdplus, 'CineHDPlus', buildScraperArgs('CineHDPlus', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles));
     }
 
-    const collection = await collectScraperResults(scraperTasks, SCRAPER_COLLECTION_TIMEOUT_MS);
+    // One controller and one validator for the whole request, so probes started
+    // while sources are still reporting are the same ones the final selection
+    // waits on, and a single abort cancels them all.
+    const validationController = new AbortController();
+    const validator = createStreamValidator(validationController.signal);
+
+    const collection = await collectScraperResults(
+      scraperTasks,
+      SCRAPER_COLLECTION_TIMEOUT_MS,
+      (streams) => startEagerValidation(streams, validator)
+    );
 
     const countStreams = (results) => results.reduce((total, res) => (
       total + (res.status === 'fulfilled' && Array.isArray(res.value) ? res.value.length : 0)
@@ -678,7 +779,7 @@ async function getStreamsUncached(type, id, season, episode) {
 
     const directStreams = streams.filter((stream) => Boolean(stream?.url));
     const sanitizedStreams = uniqueStreams(directStreams.map(sanitizeStream).filter(Boolean));
-    const playableStreams = await validatePlayableStreams(sanitizedStreams);
+    const playableStreams = await validatePlayableStreams(sanitizedStreams, validator, validationController);
     return sortStreams(playableStreams);
 
   } catch (err) {
@@ -691,9 +792,9 @@ async function getStreams(type, id, season, episode) {
   const key = [type, id, season || '', episode || ''].join(':');
   const cached = streamCache.get(key);
 
-  if (cached && cached.expiresAt > Date.now()) {
-    console.log(`Scraper orchestrator: Cache hit for ${key} (${cached.streams.length} streams)`);
-    return cached.streams;
+  if (cached) {
+    console.log(`Scraper orchestrator: Cache hit for ${key} (${cached.length} streams)`);
+    return cached;
   }
 
   if (inFlightRequests.has(key)) {
@@ -702,13 +803,9 @@ async function getStreams(type, id, season, episode) {
   }
 
   const request = getStreamsUncached(type, id, season, episode)
-    .then((streams) => {
-      streamCache.set(key, {
-        streams,
-        expiresAt: Date.now() + (streams.length > 0 ? STREAM_CACHE_TTL_MS : EMPTY_STREAM_CACHE_TTL_MS)
-      });
-      return streams;
-    })
+    .then((streams) => (
+      streamCache.set(key, streams, streams.length > 0 ? STREAM_CACHE_TTL_MS : EMPTY_STREAM_CACHE_TTL_MS)
+    ))
     .finally(() => {
       inFlightRequests.delete(key);
     });
@@ -717,4 +814,7 @@ async function getStreams(type, id, season, episode) {
   return request;
 }
 
-module.exports = { getStreams };
+module.exports = {
+  getStreams,
+  __test: { sanitizeStream, streamCache, hostHealth, createStreamValidator, startEagerValidation }
+};

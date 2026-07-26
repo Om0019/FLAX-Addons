@@ -2,19 +2,31 @@
  * Dean Edwards Unpacker Utility
  */
 const cheerio = require('cheerio');
-const { decodeHtmlEntities, fetchTextWithTimeout, fetchWithTimeout, normalizeUrl } = require('./http');
+const { decodeHtmlEntities, fetchTextWithTimeout, normalizeUrl } = require('./http');
 
 const PLAYER_FETCH_TIMEOUT_MS = 5000;
 const PELISPLUS_FETCH_TIMEOUT_MS = 4500;
 const MAX_RESOLVE_DEPTH = 5;
 const DOOD_DIRECT_TIMEOUT_MS = 1800;
 const FILEMOON_API_TIMEOUT_MS = 3500;
+// embed69 states its own proof-of-work difficulty, and the search costs 16^difficulty
+// hashes. Node is single-threaded, so an unbounded search stalls every other in-flight
+// request: difficulty 6 measures ~58s of blocked event loop, difficulty 7 ~15 minutes.
+// Bound it in wall-clock time so the damage is capped regardless of CPU speed, and
+// reject difficulties that are hopeless up front. Difficulty 5 (~1.3s expected) still
+// completes ~90% of the time; anything slower is not worth the shared event loop.
+const MAX_POW_DIFFICULTY = 6;
+const MAX_POW_MS = 3000;
 
 function unpack(p, a, c, k, e, d) {
   const e_func = function(c) {
-    return (c < a ? '' : e_func(Math.floor(c / a))) + 
+    return (c < a ? '' : e_func(Math.floor(c / a))) +
       ((c = c % a) > 35 ? String.fromCharCode(c + 29) : c.toString(36));
   };
+  // `c` is parsed straight out of the remote page and is only ever used to index
+  // into `k`, so anything past the dictionary length is a no-op loop. Clamping
+  // keeps a bogus value from spinning the event loop (c=5e8 measures ~2.8s).
+  c = Math.min(Number(c) || 0, k.length);
   while (c--) {
     if (k[c]) {
       p = p.replace(new RegExp('\\b' + e_func(c) + '\\b', 'g'), k[c]);
@@ -434,13 +446,12 @@ async function resolvePelisplus(embedUrl, userAgent, referer, signal) {
     if (!hash) return null;
     
     const apiUrl = `https://${host}/api/v1/video?id=${hash}`;
-    const res = await fetchWithTimeout(apiUrl, {
+    const { res, text: hexData } = await fetchTextWithTimeout(apiUrl, {
       headers: { 'User-Agent': userAgent, 'Referer': referer || embedUrl, 'Origin': `https://${host}` },
       signal
     }, PELISPLUS_FETCH_TIMEOUT_MS);
     if (!res.ok) return null;
     
-    const hexData = await res.text();
     const buf = Buffer.from(hexData.trim(), 'hex');
     
     const decipher = crypto.createDecipheriv('aes-128-cbc', PELISPLUS_KEY, PELISPLUS_IV);
@@ -473,6 +484,20 @@ async function resolvePelisplus(embedUrl, userAgent, referer, signal) {
   }
 }
 
+/**
+ * Strips PKCS#7 padding from a decrypted string, tolerating a trailing byte that
+ * is not padding at all. A pad of 0 would make slice(0, -0) return the whole
+ * string emptied, and a decrypted block whose last byte happens to exceed the
+ * block size would otherwise cut real content off the end.
+ */
+function stripPkcs7Padding(decrypted) {
+  const pad = decrypted.charCodeAt(decrypted.length - 1);
+  if (!Number.isInteger(pad) || pad < 1 || pad > 16 || pad > decrypted.length) {
+    return decrypted;
+  }
+  return decrypted.slice(0, -pad);
+}
+
 function decryptEmbed69(html) {
   const powChallengeMatch = html.match(/const POW_CHALLENGE = '([^']+)';/);
   const powDifficultyMatch = html.match(/const POW_DIFFICULTY = (\d+);/);
@@ -493,7 +518,13 @@ function decryptEmbed69(html) {
       return null;
   }
   
+  if (difficulty > MAX_POW_DIFFICULTY) {
+      console.warn(`Unpacker: Refusing embed69 proof-of-work at difficulty ${difficulty} (max ${MAX_POW_DIFFICULTY}).`);
+      return null;
+  }
+
   const prefix = '0'.repeat(difficulty);
+  const powDeadline = Date.now() + MAX_POW_MS;
   let nonce = 0;
   let aesKey = null;
   while (true) {
@@ -503,8 +534,13 @@ function decryptEmbed69(html) {
           break;
       }
       nonce++;
+      // Checked in blocks so the clock read costs nothing next to ~1k hashes.
+      if ((nonce & 0x3ff) === 0 && Date.now() > powDeadline) {
+          console.warn(`Unpacker: embed69 proof-of-work (difficulty ${difficulty}) exceeded ${MAX_POW_MS}ms after ${nonce} nonces; giving up.`);
+          return null;
+      }
   }
-  
+
   const decryptedLinks = [];
   for (const file of dataLink) {
       if (file.sortedEmbeds) {
@@ -516,9 +552,9 @@ function decryptEmbed69(html) {
                       const ciphertext = raw.slice(16);
                       const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, iv);
                       decipher.setAutoPadding(false);
-                      let decrypted = decipher.update(ciphertext, undefined, 'utf8') + decipher.final('utf8');
-                      const pad = decrypted.charCodeAt(decrypted.length - 1);
-                      decrypted = decrypted.slice(0, -pad);
+                      const decrypted = stripPkcs7Padding(
+                        decipher.update(ciphertext, undefined, 'utf8') + decipher.final('utf8')
+                      );
                       decryptedLinks.push({ server: embed.servername, url: decrypted, kind: 'video' });
                   } catch (e) {
                       // ignore
@@ -536,9 +572,9 @@ function decryptEmbed69(html) {
                       const ciphertext = raw.slice(16);
                       const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, iv);
                       decipher.setAutoPadding(false);
-                      let decrypted = decipher.update(ciphertext, undefined, 'utf8') + decipher.final('utf8');
-                      const pad = decrypted.charCodeAt(decrypted.length - 1);
-                      decrypted = decrypted.slice(0, -pad);
+                      const decrypted = stripPkcs7Padding(
+                        decipher.update(ciphertext, undefined, 'utf8') + decipher.final('utf8')
+                      );
                       decryptedLinks.push({ server: embed.servername, url: decrypted, kind: 'download' });
                   } catch (e) {
                       // ignore
@@ -559,7 +595,7 @@ async function resolveDood(html, url, userAgent, signal) {
   if (!passUrl) return null;
 
   try {
-    const res = await fetchWithTimeout(passUrl, {
+    const { res, text } = await fetchTextWithTimeout(passUrl, {
       headers: {
         'User-Agent': userAgent,
         'Referer': url,
@@ -569,7 +605,7 @@ async function resolveDood(html, url, userAgent, signal) {
     }, DOOD_DIRECT_TIMEOUT_MS);
     if (!res.ok) return null;
 
-    const direct = (await res.text()).trim().replace(/\\\//g, '/');
+    const direct = text.trim().replace(/\\\//g, '/');
     if (/^https?:\/\/.+\.(?:m3u8|mp4|mkv)(?:$|[?#])/i.test(direct)) {
       return direct;
     }
@@ -830,6 +866,7 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
 }
 
 module.exports = {
+  __test: { stripPkcs7Padding },
   decryptEmbed69,
   extractDirectStream,
   extractXupalaceServers,

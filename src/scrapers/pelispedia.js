@@ -1,20 +1,13 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
-const { fetchWithTimeout, normalizeUrl } = require('../http');
+const { fetchTextWithTimeout, fetchWithTimeout, normalizeUrl } = require('../http');
+const { cleanText, extractYear, mapWithConcurrency } = require('./common');
 
 const BASE_URL = 'https://pelispedia.mov';
 const SEARCH_TIMEOUT_MS = 5000;
 const PAGE_TIMEOUT_MS = 5500;
 const PLAYER_CONCURRENCY = 4;
 
-function cleanText(str) {
-  if (!str) return '';
-  return str
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]/g, '');
-}
 
 function slugifyTitle(str) {
   if (!str) return '';
@@ -27,10 +20,6 @@ function slugifyTitle(str) {
     .replace(/^-+|-+$/g, '');
 }
 
-function extractYear(value) {
-  const match = String(value || '').match(/\b(?:19|20)\d{2}\b/);
-  return match ? parseInt(match[0], 10) : null;
-}
 
 function scoreCandidate(result, title, originalTitle, year, extraTitles = []) {
   const cleanTitle = cleanText(title);
@@ -85,13 +74,11 @@ async function search(title, originalTitle, year, type, userAgent, signal, extra
   for (const query of queries) {
     try {
       const searchUrl = `${BASE_URL}/search?s=${encodeURIComponent(query)}`;
-      const res = await fetchWithTimeout(searchUrl, {
+      const { res, text: html } = await fetchTextWithTimeout(searchUrl, {
         headers: { 'User-Agent': userAgent },
         signal
       }, SEARCH_TIMEOUT_MS);
       if (!res.ok) continue;
-
-      const html = await res.text();
       const $ = cheerio.load(html);
       const results = [];
 
@@ -169,24 +156,6 @@ function findEpisodeUrl(html, pageUrl, season, episode) {
   return match;
 }
 
-async function mapWithConcurrency(items, concurrency, worker) {
-  const results = [];
-  let index = 0;
-
-  async function runNext() {
-    while (index < items.length) {
-      const currentIndex = index++;
-      const result = await worker(items[currentIndex], currentIndex);
-      if (result) results.push(result);
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, items.length) }, () => runNext())
-  );
-
-  return results;
-}
 
 async function scrape(title, originalTitle, year, type, season, episode, options = {}) {
   const { signal, extraTitles = [] } = options;
@@ -200,13 +169,13 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     }
 
     let targetUrl = pageUrl;
-    let pageRes = await fetchWithTimeout(targetUrl, {
+    let page = await fetchTextWithTimeout(targetUrl, {
       headers: { 'User-Agent': userAgent },
       signal
     }, PAGE_TIMEOUT_MS);
-    if (!pageRes.ok) return [];
+    if (!page.res.ok) return [];
 
-    let pageHtml = await pageRes.text();
+    let pageHtml = page.text;
     if (type === 'series') {
       const episodeUrl = findEpisodeUrl(pageHtml, pageUrl, season, episode);
       if (!episodeUrl) {
@@ -214,12 +183,12 @@ async function scrape(title, originalTitle, year, type, season, episode, options
         return [];
       }
       targetUrl = episodeUrl;
-      pageRes = await fetchWithTimeout(targetUrl, {
+      page = await fetchTextWithTimeout(targetUrl, {
         headers: { 'User-Agent': userAgent },
         signal
       }, PAGE_TIMEOUT_MS);
-      if (!pageRes.ok) return [];
-      pageHtml = await pageRes.text();
+      if (!page.res.ok) return [];
+      pageHtml = page.text;
     }
 
     const iframeUrls = extractIframeUrls(pageHtml, targetUrl);
