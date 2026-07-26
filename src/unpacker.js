@@ -1,6 +1,7 @@
 /**
  * Dean Edwards Unpacker Utility
  */
+const cheerio = require('cheerio');
 const { decodeHtmlEntities, fetchTextWithTimeout, fetchWithTimeout, normalizeUrl } = require('./http');
 
 const PLAYER_FETCH_TIMEOUT_MS = 5000;
@@ -153,6 +154,75 @@ function isWaawHost(value) {
 function isNuploadHost(value) {
   const host = getHostname(value);
   return /(^|\.)n(?:u)?upload\.(?:top|me)$/i.test(host);
+}
+
+function isXupalaceHost(value) {
+  return /(^|\.)xupalace\.org$/i.test(getHostname(value));
+}
+
+const XUPALACE_LOCKER_SERVERS = new Set([
+  '1fichier', 'fichier', 'mega', 'mediafire', 'uptobox', 'drive',
+  'gofile', 'wetransfer', 'terabox', 'pixeldrain', 'zippyshare'
+]);
+
+function scoreXupalaceServer(server) {
+  const s = (server || '').toLowerCase();
+  if (s.includes('streamwish') || s.includes('hlswish') || s.includes('vidhide')) return 0;
+  if (s.includes('filemoon')) return 1;
+  if (s.includes('dood')) return 2;
+  if (s.includes('voe')) return 4;
+  if (s.includes('waaw') || s.includes('netu')) return 5;
+  return 3;
+}
+
+/**
+ * Xupalace ("GoTV"-style) multi-server widget: pages list several embed
+ * servers via `onclick="go_to_playerVast('URL', lang, idx)"` handlers
+ * instead of exposing them as real <iframe> tags, so the generic iframe
+ * regex never sees them.
+ */
+function extractXupalaceServers(html, baseUrl) {
+  const $ = cheerio.load(html || '');
+  const results = [];
+  const seen = new Set();
+
+  $('[onclick*="go_to_playerVast"]').each((_, el) => {
+    const onclick = $(el).attr('onclick') || '';
+    const match = onclick.match(/go_to_playerVast\(\s*['"]([^'"]+)['"]/);
+    if (!match) return;
+
+    const url = normalizeUrl(decodeHtmlEntities(match[1]), baseUrl);
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+
+    const imgName = ($(el).find('img').attr('src') || '')
+      .split('/').pop()
+      .replace(/\.[a-z0-9]+$/i, '')
+      .toLowerCase();
+    const label = ($(el).find('span').first().text() || imgName || '').trim().toLowerCase();
+
+    results.push({ url, server: label });
+  });
+
+  return results;
+}
+
+async function resolveXupalaceServers(html, baseUrl, userAgent, options) {
+  const { depth, visited, signal } = options;
+  const servers = extractXupalaceServers(html, baseUrl)
+    .filter((entry) => !XUPALACE_LOCKER_SERVERS.has(entry.server))
+    .sort((a, b) => scoreXupalaceServer(a.server) - scoreXupalaceServer(b.server));
+
+  for (const entry of servers) {
+    try {
+      const directUrl = await resolvePlayerStream(entry.url, userAgent, baseUrl, { depth: depth + 1, visited, signal });
+      if (directUrl) return directUrl;
+    } catch (e) {
+      console.warn(`Unpacker: Xupalace server ${entry.server || entry.url} failed: ${e.message}`);
+    }
+  }
+
+  return null;
 }
 
 function normalizeWaawEmbedUrl(url, referer) {
@@ -659,6 +729,11 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
         }, PLAYER_FETCH_TIMEOUT_MS);
         if (!res.ok) return null;
 
+        if (isXupalaceHost(url) || html.includes('go_to_playerVast')) {
+            const xupalaceDirectUrl = await resolveXupalaceServers(html, url, userAgent, { depth, visited, signal });
+            if (xupalaceDirectUrl) return xupalaceDirectUrl;
+        }
+
         if (isVoeHost(url) && html.includes('generate-token') && !url.includes('permanentToken=')) {
             const tokenUrl = addVoePermanentToken(url);
             if (tokenUrl && tokenUrl !== url) {
@@ -757,6 +832,7 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
 module.exports = {
   decryptEmbed69,
   extractDirectStream,
+  extractXupalaceServers,
   resolvePelisplus,
   resolvePlayerStream,
   unpack
