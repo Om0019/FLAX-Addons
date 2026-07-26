@@ -145,7 +145,7 @@ function findEpisodeUrl(html, pageUrl, season, episode) {
   if (!season || !episode) return null;
   const $ = cheerio.load(html);
   const patterns = [
-    new RegExp(`(?:temporada|season)[^0-9]*${season}[^0-9]+(?:episodio|episode)[^0-9]*${episode}`, 'i'),
+    new RegExp(`(?:temporada|season)[^0-9]*${season}[^0-9]+(?:episodio|episode|capitulo|capítulo)[^0-9]*${episode}`, 'i'),
     new RegExp(`\\b${season}\\s*x\\s*${episode}\\b`, 'i'),
     new RegExp(`\\bs${season}\\s*e${episode}\\b`, 'i')
   ];

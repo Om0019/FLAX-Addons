@@ -186,7 +186,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
       headers: { 'User-Agent': userAgent },
       signal
     }, SEARCH_TIMEOUT_MS);
-    if (!res.ok) return [];
+    if (!res.ok) return null;
 
     const html = await res.text();
     const $ = cheerio.load(html);
