@@ -247,7 +247,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
       signal
     }, SEARCH_TIMEOUT_MS);
     console.log(`TioPlus search HTTP status for ${searchQuery}:`, res.status);
-    if (!res.ok) return [];
+    if (!res.ok) return null;
 
     const html = await res.text();
     const $ = cheerio.load(html);
