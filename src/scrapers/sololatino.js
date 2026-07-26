@@ -46,9 +46,10 @@ function extractCandidateYears(...values) {
   return years;
 }
 
-function scoreCandidate(result, targetTitle, originalTargetTitle, year) {
+function scoreCandidate(result, targetTitle, originalTargetTitle, year, extraTitles = []) {
   const cleanTargetTitle = cleanText(targetTitle);
   const cleanOriginalTitle = cleanText(originalTargetTitle);
+  const cleanExtraTitles = extraTitles.map(cleanText).filter(Boolean);
   const cleanResultTitle = cleanText(result.title);
   const slug = extractSlug(result.url);
   const cleanSlug = cleanText(slug.replace(/-/g, ' '));
@@ -74,6 +75,11 @@ function scoreCandidate(result, targetTitle, originalTargetTitle, year) {
     score += 2;
   }
 
+  for (const cleanExtra of cleanExtraTitles) {
+    if (cleanResultTitle === cleanExtra || cleanSlug === cleanExtra) score += 4;
+    else if (cleanResultTitle.includes(cleanExtra) || cleanExtra.includes(cleanResultTitle)) score += 2;
+  }
+
   if (year) {
     const yearStr = year.toString();
     if (result.title.includes(yearStr) || cleanResultTitle.includes(yearStr) || cleanSlug.includes(yearStr)) {
@@ -84,12 +90,12 @@ function scoreCandidate(result, targetTitle, originalTargetTitle, year) {
   return score;
 }
 
-function buildFallbackUrls(type, title, originalTitle) {
+function buildFallbackUrls(type, title, originalTitle, extraTitles = []) {
   const basePath = type === 'series' ? 'serie' : 'pelicula';
   const candidates = [];
   const seen = new Set();
 
-  for (const value of [title, originalTitle]) {
+  for (const value of [title, originalTitle, ...extraTitles]) {
     const slug = slugifyTitle(value);
     if (!slug || seen.has(slug)) continue;
     seen.add(slug);
@@ -177,7 +183,7 @@ async function mapWithConcurrency(items, concurrency, worker) {
  * SoloLatino Scraper
  */
 async function scrape(title, originalTitle, year, type, season, episode, options = {}) {
-  const { signal } = options;
+  const { signal, extraTitles = [] } = options;
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   async function performSearch(searchQuery) {
@@ -186,7 +192,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
       headers: { 'User-Agent': userAgent },
       signal
     }, SEARCH_TIMEOUT_MS);
-    if (!res.ok) return [];
+    if (!res.ok) return null;
 
     const html = await res.text();
     const $ = cheerio.load(html);
@@ -222,7 +228,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     let bestScore = 0;
 
     for (const r of uniqueResults) {
-      const score = scoreCandidate(r, title, originalTitle, year);
+      const score = scoreCandidate(r, title, originalTitle, year, extraTitles);
       if (score > bestScore) {
         bestScore = score;
         bestMatch = r;
@@ -240,8 +246,18 @@ async function scrape(title, originalTitle, year, type, season, episode, options
       bestMatch = await performSearch(originalTitle);
     }
 
+    const triedClean = new Set([cleanText(title), cleanText(originalTitle)]);
+    for (const extraTitle of extraTitles) {
+      if (bestMatch) break;
+      const cleanExtra = cleanText(extraTitle);
+      if (!cleanExtra || triedClean.has(cleanExtra)) continue;
+      triedClean.add(cleanExtra);
+      console.log(`SoloLatino: No match yet, trying alternative title "${extraTitle}"`);
+      bestMatch = await performSearch(extraTitle);
+    }
+
     if (!bestMatch) {
-      for (const candidate of buildFallbackUrls(type, title, originalTitle)) {
+      for (const candidate of buildFallbackUrls(type, title, originalTitle, extraTitles)) {
         try {
           const probedCandidate = await probeFallbackCandidate(candidate, year, userAgent, signal);
           if (probedCandidate) {

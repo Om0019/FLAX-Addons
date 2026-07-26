@@ -22,12 +22,13 @@ function extractYear(value) {
   return match ? parseInt(match[0], 10) : null;
 }
 
-function scoreCandidate(result, title, originalTitle, year, type) {
+function scoreCandidate(result, title, originalTitle, year, type, extraTitles = []) {
   if (type === 'movie' && result.type !== 'movies') return 0;
   if (type === 'series' && result.type !== 'tvshows') return 0;
 
   const cleanTitle = cleanText(title);
   const cleanOriginal = cleanText(originalTitle);
+  const cleanExtras = extraTitles.map(cleanText).filter(Boolean);
   const cleanResult = cleanText(result.title);
   const cleanOriginalResult = cleanText(result.original_title);
   const cleanSlug = cleanText(String(result.slug || '').replace(/-/g, ' '));
@@ -38,6 +39,11 @@ function scoreCandidate(result, title, originalTitle, year, type) {
   if (cleanTitle && cleanResult === cleanTitle) score += 5;
   if (cleanOriginal && cleanOriginalResult === cleanOriginal) score += 5;
 
+  for (const cleanExtra of cleanExtras) {
+    if (cleanResult.includes(cleanExtra) || cleanSlug.includes(cleanExtra) || cleanOriginalResult.includes(cleanExtra)) score += 4;
+    if (cleanResult === cleanExtra || cleanOriginalResult === cleanExtra) score += 5;
+  }
+
   if (year) {
     const resultYear = extractYear(result.release_date || result.title || result.slug);
     if (resultYear && resultYear !== year) return 0;
@@ -47,8 +53,8 @@ function scoreCandidate(result, title, originalTitle, year, type) {
   return score;
 }
 
-async function search(title, originalTitle, year, type, userAgent, signal) {
-  const queries = [...new Set([title, originalTitle].filter(Boolean))];
+async function search(title, originalTitle, year, type, userAgent, signal, extraTitles = []) {
+  const queries = [...new Set([title, originalTitle, ...extraTitles].filter(Boolean))];
 
   for (const query of queries) {
     const url = new URL(`${API_URL}/search`);
@@ -69,7 +75,7 @@ async function search(title, originalTitle, year, type, userAgent, signal) {
       let bestScore = 0;
 
       for (const post of posts) {
-        const score = scoreCandidate(post, title, originalTitle, year, type);
+        const score = scoreCandidate(post, title, originalTitle, year, type, extraTitles);
         if (score > bestScore) {
           bestMatch = post;
           bestScore = score;
@@ -131,11 +137,11 @@ async function mapWithConcurrency(items, concurrency, worker) {
 }
 
 async function scrape(title, originalTitle, year, type, season, episode, options = {}) {
-  const { signal } = options;
+  const { signal, extraTitles = [] } = options;
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   try {
-    const match = await search(title, originalTitle, year, type, userAgent, signal);
+    const match = await search(title, originalTitle, year, type, userAgent, signal, extraTitles);
     if (!match) {
       console.log(`LaMovie: No matching content found for "${title}"`);
       return [];

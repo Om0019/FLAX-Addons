@@ -32,9 +32,10 @@ function extractYear(value) {
   return match ? parseInt(match[0], 10) : null;
 }
 
-function scoreCandidate(result, title, originalTitle, year) {
+function scoreCandidate(result, title, originalTitle, year, extraTitles = []) {
   const cleanTitle = cleanText(title);
   const cleanOriginal = cleanText(originalTitle);
+  const cleanExtras = extraTitles.map(cleanText).filter(Boolean);
   const cleanResult = cleanText(result.title);
   const cleanSlug = cleanText(result.url.split('/').pop()?.replace(/-/g, ' '));
   let score = 0;
@@ -43,6 +44,11 @@ function scoreCandidate(result, title, originalTitle, year) {
   if (cleanOriginal && (cleanResult.includes(cleanOriginal) || cleanSlug.includes(cleanOriginal))) score += 3;
   if (cleanTitle && cleanResult === cleanTitle) score += 5;
   if (cleanOriginal && cleanSlug === cleanOriginal) score += 5;
+
+  for (const cleanExtra of cleanExtras) {
+    if (cleanResult.includes(cleanExtra) || cleanSlug.includes(cleanExtra)) score += 3;
+    if (cleanResult === cleanExtra || cleanSlug === cleanExtra) score += 5;
+  }
 
   if (year) {
     const resultYear = extractYear(`${result.title} ${result.year || ''} ${result.url}`);
@@ -53,12 +59,12 @@ function scoreCandidate(result, title, originalTitle, year) {
   return score;
 }
 
-function buildFallbackUrls(type, title, originalTitle, year) {
+function buildFallbackUrls(type, title, originalTitle, year, extraTitles = []) {
   const basePath = type === 'series' ? 'serie' : 'pelicula';
   const candidates = [];
   const seen = new Set();
 
-  for (const value of [title, originalTitle]) {
+  for (const value of [title, originalTitle, ...extraTitles]) {
     const slug = slugifyTitle(value);
     if (!slug) continue;
 
@@ -72,8 +78,8 @@ function buildFallbackUrls(type, title, originalTitle, year) {
   return candidates;
 }
 
-async function search(title, originalTitle, year, type, userAgent, signal) {
-  const queries = [...new Set([title, originalTitle].filter(Boolean))];
+async function search(title, originalTitle, year, type, userAgent, signal, extraTitles = []) {
+  const queries = [...new Set([title, originalTitle, ...extraTitles].filter(Boolean))];
   const pathNeedle = type === 'series' ? '/serie/' : '/pelicula/';
 
   for (const query of queries) {
@@ -101,7 +107,7 @@ async function search(title, originalTitle, year, type, userAgent, signal) {
       let bestMatch = null;
       let bestScore = 0;
       for (const result of results) {
-        const score = scoreCandidate(result, title, originalTitle, year);
+        const score = scoreCandidate(result, title, originalTitle, year, extraTitles);
         if (score > bestScore) {
           bestMatch = result;
           bestScore = score;
@@ -114,7 +120,7 @@ async function search(title, originalTitle, year, type, userAgent, signal) {
     }
   }
 
-  for (const candidateUrl of buildFallbackUrls(type, title, originalTitle, year)) {
+  for (const candidateUrl of buildFallbackUrls(type, title, originalTitle, year, extraTitles)) {
     try {
       const res = await fetchWithTimeout(candidateUrl, {
         headers: { 'User-Agent': userAgent },
@@ -145,7 +151,7 @@ function findEpisodeUrl(html, pageUrl, season, episode) {
   if (!season || !episode) return null;
   const $ = cheerio.load(html);
   const patterns = [
-    new RegExp(`(?:temporada|season)[^0-9]*${season}[^0-9]+(?:episodio|episode)[^0-9]*${episode}`, 'i'),
+    new RegExp(`(?:temporada|season)[^0-9]*${season}[^0-9]+(?:episodio|episode|capitulo|capítulo)[^0-9]*${episode}`, 'i'),
     new RegExp(`\\b${season}\\s*x\\s*${episode}\\b`, 'i'),
     new RegExp(`\\bs${season}\\s*e${episode}\\b`, 'i')
   ];
@@ -183,11 +189,11 @@ async function mapWithConcurrency(items, concurrency, worker) {
 }
 
 async function scrape(title, originalTitle, year, type, season, episode, options = {}) {
-  const { signal } = options;
+  const { signal, extraTitles = [] } = options;
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   try {
-    const pageUrl = await search(title, originalTitle, year, type, userAgent, signal);
+    const pageUrl = await search(title, originalTitle, year, type, userAgent, signal, extraTitles);
     if (!pageUrl) {
       console.log(`PelisPedia: No matching content found for "${title}"`);
       return [];

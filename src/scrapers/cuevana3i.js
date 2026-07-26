@@ -32,10 +32,10 @@ function slugifyTitle(str, options = {}) {
     .replace(/^-+|-+$/g, '');
 }
 
-function buildSlugCandidates(title, originalTitle) {
+function buildSlugCandidates(title, originalTitle, extraTitles = []) {
   const candidates = [];
   const seen = new Set();
-  const values = [title, originalTitle].filter(Boolean);
+  const values = [title, originalTitle, ...extraTitles].filter(Boolean);
   const ampWords = ['y', 'and'];
 
   for (const value of values) {
@@ -50,9 +50,9 @@ function buildSlugCandidates(title, originalTitle) {
   return candidates;
 }
 
-function buildPageCandidates(type, title, originalTitle) {
+function buildPageCandidates(type, title, originalTitle, extraTitles = []) {
   const basePath = type === 'series' ? 'serie' : 'pelicula';
-  return buildSlugCandidates(title, originalTitle).map((slug) => ({
+  return buildSlugCandidates(title, originalTitle, extraTitles).map((slug) => ({
     slug,
     url: `https://cuevana3i.you/${basePath}/${slug}`
   }));
@@ -182,12 +182,12 @@ async function probePage(candidate, userAgent, signal) {
 }
 
 async function scrape(title, originalTitle, year, type, season, episode, options = {}) {
-  const { signal } = options;
+  const { signal, extraTitles = [] } = options;
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   try {
     let bestMatch = null;
-    const candidates = buildPageCandidates(type, title, originalTitle);
+    const candidates = buildPageCandidates(type, title, originalTitle, extraTitles);
 
     for (const candidate of candidates) {
       bestMatch = await probePage(candidate, userAgent, signal);

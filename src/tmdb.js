@@ -197,9 +197,42 @@ async function getMetaDetails(type, tmdbId, options = {}) {
   }
 }
 
+/**
+ * Fetches every Spanish-dub title TMDB has on file for a movie/series,
+ * across regions (e.g. "Anatomía de Grey" for ES vs "Anatomía según Grey"
+ * for MX). Sites don't consistently use the same regional dub name as our
+ * primary es-MX lookup, so this widens the pool of titles scrapers can
+ * search for. Uses /translations rather than /alternative_titles because
+ * the latter is crowd-sourced and frequently missing Spanish entries
+ * entirely, while /translations reliably carries the official localized
+ * name TMDB itself displays per region.
+ */
+async function getAlternativeTitles(type, tmdbId) {
+  if (!tmdbId) return [];
+  const tmdbType = type === 'series' ? 'tv' : 'movie';
+
+  try {
+    const data = await fetchFromTMDB(`/${tmdbType}/${tmdbId}/translations`);
+    const entries = data.translations || [];
+    const titles = new Set();
+
+    for (const entry of entries) {
+      if (entry.iso_639_1 !== 'es') continue;
+      const value = (entry.data?.name || entry.data?.title || '').trim();
+      if (value) titles.add(value);
+    }
+
+    return [...titles];
+  } catch (error) {
+    console.warn(`Error fetching alternative titles for ${tmdbType}/${tmdbId}:`, error.message);
+    return [];
+  }
+}
+
 module.exports = {
   findByImdbId,
   getTrending,
   searchCatalog,
-  getMetaDetails
+  getMetaDetails,
+  getAlternativeTitles
 };
