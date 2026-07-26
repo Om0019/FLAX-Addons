@@ -200,6 +200,26 @@ async function mapWithConcurrencyUntilEnough(items, concurrency, worker, options
 }
 
 /**
+ * TioPlus takes the query as a URL path segment, and two characters break it
+ * regardless of encoding. A plain apostrophe returns HTTP 500 (%27 fails too, so
+ * their server unescapes before choking on it) and a slash returns 404 even as
+ * %2F. Both are silent losses: the search attempt is spent and nothing comes back.
+ * Dropping the apostrophe and spacing out the slash turns both into working
+ * queries — "Schindler's List" and "Face/Off" each go from 0 hits to 1.
+ *
+ * A curly apostrophe is fine and is left alone. This only shapes the outgoing
+ * query; matching still scores against the real title, and cleanText discards
+ * punctuation anyway, so nothing downstream is affected.
+ */
+function toSearchQuery(value) {
+  return String(value || '')
+    .replace(/'/g, '')
+    .replace(/\//g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * Decodes base64 string to UTF-8.
  */
 function b64_to_utf8(str) {
@@ -225,7 +245,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   async function performSearch(searchQuery) {
-    const searchUrl = `https://tioplus.app/api/search/${encodeURIComponent(searchQuery)}`;
+    const searchUrl = `https://tioplus.app/api/search/${encodeURIComponent(toSearchQuery(searchQuery))}`;
     const { res, text: html } = await fetchTextWithTimeout(searchUrl, {
       headers: {
         'User-Agent': userAgent,
@@ -455,4 +475,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
   }
 }
 
-module.exports = { scrape };
+module.exports = {
+  scrape,
+  __test: { toSearchQuery }
+};
