@@ -743,9 +743,16 @@ async function isPlayableStream(stream, signal) {
       // the top and then played nothing. Follow one variant before believing it.
       if (playable && isMasterPlaylist(body)) {
         const variantUrl = firstVariantUrl(body, response.url || stream.url);
+        // No variant to follow means two different things. On a body that was read
+        // whole it is a master naming nothing playable, and that is a refusal. On a
+        // truncated one the first variant URI can simply sit past the range that was
+        // asked for — a master with a long run of #EXT-X-MEDIA renditions, which is
+        // ordinary for multi-language Latino content — and calling that unreachable
+        // dropped a live stream and charged its host a hard failure, two of which
+        // mark the whole CDN dead for three minutes.
         const variantVerdict = variantUrl
           ? await probeHlsVariant(variantUrl, headers, signal)
-          : false;
+          : (isCompleteProbeBody(body) ? false : null);
 
         if (variantVerdict === false) {
           console.log(`Scraper orchestrator: Filtering master playlist whose variants are unreachable: ${stream.url}`);

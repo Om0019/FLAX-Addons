@@ -72,7 +72,18 @@ const TIER_PATTERNS = [
 // A quality already written into a title, ours or the source's, with any bullet
 // that joins it on. Used to keep a measurement from being appended next to the
 // claim it contradicts.
-const TITLE_QUALITY_TOKEN = /\s*[•·|]?\s*(?:[≥~]?\d{3,4}p|\b(?:4k|uhd)\b)/gi;
+//
+// The tier words are here for the same reason the digits are: they are the same
+// claim in a different spelling, and matching only digits meant LaMovie's own
+// "Latino Full HD" survived a 720p measurement and reached viewers as
+// "Latino Full HD • 720p". Kept in step with TIER_PATTERNS, longest alternative
+// first so "full hd" is not left as a stray "full", and word-bounded so the "HD"
+// inside a server name like CineHDPlus is not mistaken for a claim.
+const TITLE_QUALITY_SOURCE = '\\s*[•·|]?\\s*(?:[≥~]?\\d{3,4}p|\\b(?:full\\s*hd|fhd|uhd|4k|hdcam|camrip|hdts|hd|sd|cam)\\b)';
+const TITLE_QUALITY_TOKEN = new RegExp(TITLE_QUALITY_SOURCE, 'gi');
+// Separate, non-global twin: a /g regex carries lastIndex between test() calls,
+// so the two uses must not share one object.
+const HAS_TITLE_QUALITY_TOKEN = new RegExp(TITLE_QUALITY_SOURCE, 'i');
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -283,14 +294,22 @@ function isMeasured(quality) {
  * A measurement replaces any quality already in the title, because the two can
  * disagree: LaMovie hands over its own "Latino 1080p" for ladders that top out at
  * 720p, and appending to that reads as "1080p • 720p". A claim never overwrites
- * another claim — there is nothing to prefer about it.
+ * another claim — there is nothing to prefer about it — and it is not restated
+ * beside one either: the claim in "Latino Full HD" is read straight back out of
+ * that title, and appending it produced "Latino Full HD • FHD".
  */
 function withQualityLabel(stream) {
   const label = formatQuality(stream?.quality);
   if (!label) return stream;
 
   const title = String(stream.title || '');
-  const base = isMeasured(stream.quality)
+  const measured = isMeasured(stream.quality);
+
+  if (!measured && HAS_TITLE_QUALITY_TOKEN.test(title)) {
+    return stream;
+  }
+
+  const base = measured
     ? title.replace(TITLE_QUALITY_TOKEN, '').trim()
     : title;
 
