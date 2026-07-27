@@ -182,13 +182,17 @@ function recordHostHealth(stream, outcome, details = {}) {
     || isGatewayFailureStatus(item.status)
   ));
 
+  const throttleProne = isThrottleProneHost(host);
+  const timeoutThreshold = throttleProne ? 2 : 3;
+  const gatewayFailThreshold = throttleProne ? 2 : 3;
+
   let deadUntil = current.deadUntil || 0;
   if (
     recentHardFailures.length >= 2
-    || recentTimeouts.length >= 3
-    || recentGatewayFailures.length >= 3
+    || recentTimeouts.length >= timeoutThreshold
+    || recentGatewayFailures.length >= gatewayFailThreshold
   ) {
-    deadUntil = Date.now() + HOST_DEAD_TTL_MS;
+    deadUntil = Date.now() + (throttleProne ? HOST_DEAD_TTL_MS * 2 : HOST_DEAD_TTL_MS);
   }
 
   const health = {
@@ -242,7 +246,7 @@ function scoreStream(stream) {
   const host = getStreamHost(stream);
   const title = (stream.title || '').toLowerCase();
   const healthPenalty = getHostPenalty(getHostHealth(host));
-  let baseScore = 9;
+  let baseScore = 7;
 
   // Ordering measured, not guessed. 189 streams collected straight from the sources
   // and each one played end to end — master, variant, first segment — in July 2026:
@@ -252,11 +256,20 @@ function scoreStream(stream) {
   //   hlswish        4/11   36%      turboviplay    0/17    0%
   //   pelisplus-ip   0/17    0%
   //
-  // Only the families that sample disagreed with have moved. acek-cdn, dramiyos-cdn
-  // and hlswish already sat in the right order relative to each other, and the
-  // families no stream in the sample belonged to — cfglobalcdn, mediafire, fireload,
-  // nupload, cdn-tnmr — keep the positions they had, because nothing here says
-  // anything about them.
+  // acek-cdn and dramiyos-cdn were originally placed ahead of the families the
+  // sample never touched, on the reasoning that 44-47% still beat a coin flip.
+  // Watching them play in practice (Grey's Anatomy S21, reported endless buffering
+  // on acek/dramiyos streams and 502s once the proxy gave up on a stalled fetch)
+  // showed that a "success" in the sample only meant the first segment came back
+  // — it says nothing about whether the CDN keeps up with real-time playback after
+  // that, which these two do not reliably do. Moved below every family the sample
+  // has no opinion on, so an unmeasured host — genuinely a coin flip — is now
+  // preferred over a host with a documented near-coin-flip rate. Still ahead of
+  // pelisplus-ip and turboviplay, which are not a coin flip: those are 0%.
+  //
+  // The families no stream in the sample belonged to — cfglobalcdn, mediafire,
+  // fireload, nupload, cdn-tnmr — keep the relative order they had, because nothing
+  // here says anything about them.
   //
   // Bare-IPv4 hosts are pelisplus, which serves HTTPS on addresses its certificates
   // do not cover; every one failed ERR_TLS_CERT_ALTNAME_INVALID. turboviplay serves
@@ -267,14 +280,27 @@ function scoreStream(stream) {
   else if (host.includes('turboviplay.com')) baseScore = 10;
   else if (host.includes('vimeos')) baseScore = 0;
   else if (host.includes('goodstream')) baseScore = 1;
-  else if (host.includes('acek-cdn.com')) baseScore = 3;
-  else if (host.includes('dramiyos-cdn.com') || host.includes('cfglobalcdn.com')) baseScore = 4;
-  else if (host.includes('mediafire.com') || host.includes('fireload.com')) baseScore = 5;
-  else if (host.includes('nupload')) baseScore = 6;
-  else if (host.includes('premilkyway.com') || title.includes('hlswish')) baseScore = 7;
-  else if (host.includes('cdn-tnmr.org')) baseScore = 8;
+  else if (host.includes('mediafire.com') || host.includes('fireload.com')) baseScore = 3;
+  else if (host.includes('nupload')) baseScore = 4;
+  else if (host.includes('premilkyway.com') || title.includes('hlswish')) baseScore = 5;
+  else if (host.includes('cdn-tnmr.org')) baseScore = 6;
+  else if (host.includes('acek-cdn.com')) baseScore = 8;
+  else if (host.includes('dramiyos-cdn.com') || host.includes('cfglobalcdn.com')) baseScore = 9;
 
   return baseScore + healthPenalty;
+}
+
+// acek-cdn and dramiyos-cdn fail in a way the ordinary threshold below does not
+// catch quickly: a "success" only proves the first probed bytes arrived, not that
+// the CDN can sustain real-time playback, so a run of gateway failures or timeouts
+// on these two families is a stronger signal than it is elsewhere. Pulled out of
+// rotation after two rather than three, and kept out twice as long, so a viewer who
+// just hit a 502 on one of these does not land on the same host again a few minutes
+// later.
+const THROTTLE_PRONE_HOSTS = ['acek-cdn.com', 'dramiyos-cdn.com', 'cfglobalcdn.com'];
+
+function isThrottleProneHost(host) {
+  return THROTTLE_PRONE_HOSTS.some((suffix) => host.includes(suffix));
 }
 
 function getHostFamily(stream) {

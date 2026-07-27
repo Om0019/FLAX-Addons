@@ -760,15 +760,34 @@ function testHostScoresFollowMeasuredReliability() {
   const rank = (host) => order.indexOf(host);
 
   assert.strictEqual(order[0], 's8.vimeos.net', 'the family that played every time leads');
-  assert(rank('hls2.goodstream.one') < rank('x.acek-cdn.com'), '97% outranks 47%');
-  assert(rank('x.acek-cdn.com') < rank('y.dramiyos-cdn.com'), '47% outranks 44%');
-  assert(rank('y.dramiyos-cdn.com') < rank('z.premilkyway.com'), '44% outranks 36%');
+  assert(rank('hls2.goodstream.one') < rank('z.premilkyway.com'), '97% outranks 36%');
+  assert(rank('x.acek-cdn.com') < rank('y.dramiyos-cdn.com'), '47% still outranks 44% between themselves');
 
-  // The two families that played nothing go below even an unrecognised host.
+  // A "success" in the sample only proved the first probed bytes arrived, not that
+  // the CDN sustains real-time playback — which acek-cdn and dramiyos-cdn do not
+  // reliably do (see scoreStream). Both are deliberately ranked below every family
+  // the sample has no data on, an unrecognised host included: a coin flip beats a
+  // documented near-coin-flip that stalls mid-playback.
+  for (const throttled of ['x.acek-cdn.com', 'y.dramiyos-cdn.com']) {
+    assert(
+      rank(throttled) > rank('unknown.example.com'),
+      `${throttled} is known to stall in practice and must rank below an unknown host`
+    );
+    assert(
+      rank(throttled) > rank('z.premilkyway.com'),
+      `${throttled} must rank below families the sample has no opinion on`
+    );
+  }
+
+  // The two families that played nothing go below even acek-cdn/dramiyos-cdn.
   for (const dead of ['cdn1.turboviplay.com', '45.156.158.200']) {
     assert(
       rank(dead) > rank('unknown.example.com'),
       `${dead} played nothing and must rank below an unknown host`
+    );
+    assert(
+      rank(dead) > rank('y.dramiyos-cdn.com'),
+      `${dead} played nothing and must rank below a merely throttled host`
     );
   }
 }
