@@ -20,7 +20,10 @@ const manifest = {
   id: 'com.latino.spanish',
   version: '1.0.1',
   name: 'Latino 🇲🇽',
-  description: 'Películas y Series en Español Latino y Castellano directas de Cinecalidad, SoloLatino, TioPlus, Cuevana3i, LaMovie, PelisPedia y CineHDPlus.',
+  // Lists only the sources that actually run. CineHDPlus is behind a Cloudflare
+  // managed challenge and is disabled (see scrapers/cinehdplus.js), so naming it
+  // here promised Stremio users a source that can never return anything.
+  description: 'Películas y Series en Español Latino y Castellano directas de Cinecalidad, SoloLatino, TioPlus, Cuevana3i, LaMovie y PelisPedia.',
   logo: 'https://images.unsplash.com/photo-1574267431422-7bda297781f5?q=80&w=256&auto=format&fit=crop',
   background: 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?q=80&w=1280&auto=format&fit=crop',
   types: ['movie', 'series'],
@@ -756,9 +759,9 @@ app.get('/', (req, res) => {
           </div>
         </div>
         <div class="provider-item">
-          <div class="provider-name">CineHDPlus.org</div>
-          <div class="provider-status warning">
-            <span class="dot"></span> CF Guarded
+          <div class="provider-name">Cuevana3i</div>
+          <div class="provider-status">
+            <span class="dot"></span> Online
           </div>
         </div>
       </div>
