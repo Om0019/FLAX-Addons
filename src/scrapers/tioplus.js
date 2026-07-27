@@ -199,6 +199,14 @@ async function mapWithConcurrencyUntilEnough(items, concurrency, worker, options
     }
 
     Array.from({ length: Math.min(concurrency, items.length) }, () => runNext());
+
+    // Nothing to run means nothing will ever call maybeFinish, so an empty list
+    // used to sit here until the minimum-wait timer fired and only then notice it
+    // had been finished from the start — a flat 2500ms of dead time on every page
+    // that yields no server tokens, spent inside this source's 10s budget while
+    // the orchestrator waited on it. Settling it here is the same check the
+    // workers make, run once for the case where there are no workers.
+    maybeFinish();
   });
 }
 

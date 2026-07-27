@@ -153,8 +153,10 @@ function withQuietLogs(run) {
 async function testScrapersSearchBothTitlesConcurrently() {
   const cases = [
     { name: 'SoloLatino', module: './src/scrapers/sololatino', searchUrl: /sololatino\.net\/buscar/ },
-    { name: 'TioPlus', module: './src/scrapers/tioplus', searchUrl: /tioplus\.app\// },
-    { name: 'Cinecalidad', module: './src/scrapers/cinecalidad', searchUrl: /cinecalidad\.am\/\?s=/ }
+    { name: 'TioPlus', module: './src/scrapers/tioplus', searchUrl: /tioplus\.app\/api\/search/ },
+    { name: 'Cinecalidad', module: './src/scrapers/cinecalidad', searchUrl: /cinecalidad\.am\/\?s=/ },
+    { name: 'LaMovie', module: './src/scrapers/lamovie', searchUrl: /\/search\?/ },
+    { name: 'PelisPedia', module: './src/scrapers/pelispedia', searchUrl: /\/search\?s=/ }
   ];
 
   for (const testCase of cases) {
@@ -221,6 +223,47 @@ async function testSololatinoHandshakeOverlapsPageLoad() {
     assert.ok(
       spread < CONCURRENT_WINDOW_MS,
       `handshake and page load should overlap (${spread}ms apart, stub latency ${STUB_LATENCY_MS}ms)`
+    );
+  } finally {
+    stub.restore();
+  }
+}
+
+// --- TioPlus: an empty token list must settle immediately -------------------
+
+// TioPlus pages that carry no server buttons are common (wrong episode URL, a
+// title the site lists but has no sources for). Its token collector spawns one
+// runner per item and only reconsiders finishing when a runner completes, so with
+// no items nothing settled the promise until the 2500ms minimum-wait timer fired
+// — the whole wait spent to return the empty list it already had.
+async function testTioplusEmptyTokenListReturnsImmediately() {
+  const tioplusSource = require('fs').readFileSync(
+    path.join(__dirname, 'src', 'scrapers', 'tioplus.js'),
+    'utf8'
+  );
+  const minWaitMatch = tioplusSource.match(/const TOKEN_FAST_MIN_WAIT_MS = (\d+);/);
+  assert.ok(minWaitMatch, 'TOKEN_FAST_MIN_WAIT_MS should be defined');
+  const minWaitMs = parseInt(minWaitMatch[1], 10);
+
+  // A page that matches the search but offers no server buttons at all.
+  const TOKENLESS_PAGE = '<html><head><meta name="csrf-token" content="tok"></head><body><p>Sin servidores</p></body></html>';
+  const SEARCH_HIT = '<html><body><a href="https://tioplus.app/pelicula/test-2024">Test 2024</a></body></html>';
+
+  const stub = stubFetch((target) => new Response(
+    /api\/search/.test(target) ? SEARCH_HIT : TOKENLESS_PAGE,
+    { status: 200, headers: { 'Content-Type': 'text/html' } }
+  ));
+
+  try {
+    const tioplus = require('./src/scrapers/tioplus');
+    const startedAt = Date.now();
+    const streams = await withQuietLogs(() => tioplus.scrape('Test', 'Test', 2024, 'movie', null, null, { extraTitles: [] }));
+    const elapsed = Date.now() - startedAt;
+
+    assert.deepStrictEqual(streams, [], 'a tokenless page yields no streams');
+    assert.ok(
+      elapsed < minWaitMs,
+      `an empty token list must not wait out the ${minWaitMs}ms minimum (took ${elapsed}ms)`
     );
   } finally {
     stub.restore();
@@ -321,6 +364,7 @@ async function testStalledAlternativeTitlesDoNotBlockScrapers() {
     testFailureOnConsultedTitlePropagates,
     testScrapersSearchBothTitlesConcurrently,
     testSololatinoHandshakeOverlapsPageLoad,
+    testTioplusEmptyTokenListReturnsImmediately,
     testStalledAlternativeTitlesDoNotBlockScrapers
   ];
 
