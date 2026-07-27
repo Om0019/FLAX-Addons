@@ -67,6 +67,35 @@ function* iterUnpackedScripts(html) {
   }
 }
 
+// Assets that look like streams but never are: analytics bundles, and the sample
+// clips player templates ship with. Matched as substrings because they only ever
+// appear in one form.
+const NON_STREAM_MARKERS = [
+  'google-analytics',
+  'analytics.js',
+  'tagmanager',
+  'test-videos.co.uk',
+  'big_buck_bunny'
+];
+
+// Ad hosts and ad paths, matched on segment boundaries. A bare `includes('ads')`
+// also matches "uploads" and "downloads", which is where a large share of real
+// stream URLs live — that check threw away the stream it was meant to protect.
+const AD_SEGMENT_PATTERN = /(?:^|[/.])(?:ads?|advert(?:s|ising)?|adserver|doubleclick)(?:[/.]|$)/;
+
+/** True when a URL looks like a real media asset rather than an ad or analytics one. */
+function isPlausibleStreamUrl(link) {
+  const lower = String(link || '').toLowerCase();
+  if (NON_STREAM_MARKERS.some((marker) => lower.includes(marker))) return false;
+
+  try {
+    const parsed = new URL(lower);
+    return !AD_SEGMENT_PATTERN.test(`${parsed.hostname}${parsed.pathname}`);
+  } catch {
+    return !AD_SEGMENT_PATTERN.test(lower);
+  }
+}
+
 /**
  * Parses HTML, finds any packed scripts, unpacks them, and looks for .m3u8/.mp4 stream URLs.
  * Also scans the HTML directly for any un-packed stream URLs as a fallback.
@@ -118,14 +147,7 @@ function extractDirectStream(html, baseUrl) {
     ...protocolRelativeMatches,
     ...relativeMatches,
     ...configuredMatches
-  ].map((link) => normalizeUrl(link, baseUrl)).filter(Boolean).filter(link => {
-    const l = link.toLowerCase();
-    return !l.includes('google-analytics')
-      && !l.includes('analytics.js')
-      && !l.includes('tagmanager')
-      && !l.includes('test-videos.co.uk')
-      && !l.includes('big_buck_bunny');
-  });
+  ].map((link) => normalizeUrl(link, baseUrl)).filter(Boolean).filter(isPlausibleStreamUrl);
 
   if (validDirect.length > 0) {
     return [...new Set(validDirect)][0];
@@ -134,13 +156,7 @@ function extractDirectStream(html, baseUrl) {
   // 2. Scan and unpack packed scripts (e.g. vidhide, hlswish, vimeos)
   for (const unpacked of iterUnpackedScripts(normalizedHtml)) {
     const streamMatches = unpacked.match(directRegex) || [];
-    const validStreams = streamMatches.map((link) => normalizeUrl(link, baseUrl)).filter(Boolean).filter(link => {
-      const l = link.toLowerCase();
-      return !l.includes('analytics')
-        && !l.includes('ads')
-        && !l.includes('test-videos.co.uk')
-        && !l.includes('big_buck_bunny');
-    });
+    const validStreams = streamMatches.map((link) => normalizeUrl(link, baseUrl)).filter(Boolean).filter(isPlausibleStreamUrl);
 
     if (validStreams.length > 0) {
       return [...new Set(validStreams)][0];
@@ -982,7 +998,8 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
         if (isVoeHost(url) && html.includes('generate-token') && !url.includes('permanentToken=')) {
             const tokenUrl = addVoePermanentToken(url);
             if (tokenUrl && tokenUrl !== url) {
-                return await resolvePlayerStream(tokenUrl, userAgent, referer, { depth: depth + 1, visited, signal });
+                const tokenDirectUrl = await resolvePlayerStream(tokenUrl, userAgent, referer, { depth: depth + 1, visited, signal });
+                if (tokenDirectUrl) return tokenDirectUrl;
             }
         }
 
@@ -1076,12 +1093,16 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
             }
         }
 
-        // Check for JS redirect (e.g. VOE initial page)
+        // Check for JS redirect (e.g. VOE initial page). The match is not necessarily
+        // the page's real navigation — adblock detectors and back-button handlers
+        // assign location.href too — so a redirect that leads nowhere must fall
+        // through to this page's own extraction rather than end the resolve.
         const jsRedirectMatch = html.match(/(?:(?:window|self)\.)?location(?:\.href)?\s*=\s*['"]([^'"]+)['"]|(?:(?:window|self)\.)?location\.(?:replace|assign)\s*\(\s*['"]([^'"]+)['"]\s*\)/);
         const redirectUrl = normalizeUrl(jsRedirectMatch?.[1] || jsRedirectMatch?.[2], url);
         if (redirectUrl && redirectUrl !== url && isHttpUrl(redirectUrl)) {
             console.log(`Unpacker: Following JS redirect to ${redirectUrl}`);
-            return await resolvePlayerStream(redirectUrl, userAgent, referer, { depth: depth + 1, visited, signal });
+            const redirectDirectUrl = await resolvePlayerStream(redirectUrl, userAgent, referer, { depth: depth + 1, visited, signal });
+            if (redirectDirectUrl) return redirectDirectUrl;
         }
 
         const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);

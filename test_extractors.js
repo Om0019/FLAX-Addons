@@ -4,7 +4,7 @@
 
 const assert = require('assert');
 const http = require('http');
-const { resolvePlayerStream, resolveDownloadUrl, __test } = require('./src/unpacker');
+const { extractDirectStream, resolvePlayerStream, resolveDownloadUrl, __test } = require('./src/unpacker');
 
 const {
   decodeVidguardSignature,
@@ -272,6 +272,78 @@ function testUnpackedScriptIteration() {
   assert.deepStrictEqual([...iterUnpackedScripts('<html>no scripts</html>')], [], 'a page with no packed script yields nothing');
 }
 
+/** Builds a Dean Edwards packed script carrying `url` as its player config. */
+function packStreamConfig(url) {
+  const dictionary = ['file', ...url.replace(/^https:\/\//, '').split(/[/.]/)];
+  const body = `{0:"https://${url.replace(/^https:\/\//, '').replace(/[^/.]+/g, (word) => dictionary.indexOf(word))}"}`;
+  return `<script>eval(function(p,a,c,k,e,d){}('${body}',62,${dictionary.length},'${dictionary.join('|')}'.split('|')))</script>`;
+}
+
+// A bare includes('ads') check also fires on "uploads" and "downloads" — the two
+// most common path segments real stream URLs sit under — so it discarded the
+// stream it was meant to protect. Ad hosts and ad path segments still go.
+function testPackedStreamAdFilter() {
+  const kept = [
+    'https://cdn.example.net/uploads/master.m3u8',
+    'https://cdn.example.net/downloads/movie.mp4',
+    'https://cdn.example.net/hls2/master.m3u8'
+  ];
+
+  for (const url of kept) {
+    assert.strictEqual(
+      extractDirectStream(packStreamConfig(url), 'https://host.example/e/abc'),
+      url,
+      `a packed stream under ${new URL(url).pathname} survives the ad filter`
+    );
+  }
+
+  for (const url of ['https://ads.example.net/preroll.mp4', 'https://cdn.example.net/ads/preroll.mp4']) {
+    assert.strictEqual(
+      extractDirectStream(packStreamConfig(url), 'https://host.example/e/abc'),
+      null,
+      `a genuine ad asset (${url}) is still rejected`
+    );
+  }
+
+  // The unpacked path has to agree with the packed one; they used to apply
+  // different filters to the same URL.
+  assert.strictEqual(
+    extractDirectStream('<script>file:"https://ads.example.net/preroll.mp4"</script>', 'https://host.example/e/abc'),
+    null,
+    'the unpacked path rejects ad assets too'
+  );
+}
+
+// An adblock detector or back-button handler assigns location.href on pages that
+// are not redirect stubs at all. Following it is right; ending the resolve when it
+// leads nowhere threw away a page whose stream was sitting right there.
+async function testDeadJsRedirectFallsThrough() {
+  const source = 'https://cdn.example.net/hls/master.m3u8';
+
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    if (req.url.startsWith('/blocked')) {
+      res.end('<html><body>nothing here</body></html>');
+      return;
+    }
+    res.end(`<html><script>if (window.adblockDetected) { window.location.href = "/blocked"; }</script>
+      <script>jwplayer("p").setup({file:"${source}"});</script></html>`);
+  });
+
+  await new Promise((resolve) => server.listen(0, resolve));
+
+  try {
+    const resolved = await resolvePlayerStream(
+      `http://127.0.0.1:${server.address().port}/player`,
+      userAgent,
+      'https://tioplus.app/'
+    );
+    assert.strictEqual(resolved, source, 'a redirect that leads nowhere still leaves the page extractable');
+  } finally {
+    server.close();
+  }
+}
+
 async function run() {
   const tests = [
     ['VOE payload decodes', testVoePayloadDecodes],
@@ -283,7 +355,9 @@ async function run() {
     ['Download resolution is non-destructive', testDownloadUrlResolutionIsNonDestructive],
     ['Embed path normalization', testEmbedPathNormalization],
     ['embed69 server gate', testEmbedServerGate],
-    ['Packed script iteration', testUnpackedScriptIteration]
+    ['Packed script iteration', testUnpackedScriptIteration],
+    ['Packed stream ad filter', testPackedStreamAdFilter],
+    ['Dead JS redirect falls through', testDeadJsRedirectFallsThrough]
   ];
 
   for (const [label, test] of tests) {
