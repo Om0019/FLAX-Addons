@@ -13,7 +13,7 @@ process.env.ALLOW_PRIVATE_PROXY_TARGETS = '1';
 const app = require('./src/server');
 const unpacker = require('./src/unpacker');
 const scrapers = require('./src/scrapers');
-const { withQualityLabel, qualityFromManifest, qualityFromLabel } = require('./src/quality');
+const { withQualityLabel, qualityFromManifest, qualityFromLabel, formatQuality } = require('./src/quality');
 
 const { rewriteHlsManifest, getPublicBaseUrl } = app.__test;
 const { createStreamValidator, hostHealth, firstVariantUrl } = scrapers.__test;
@@ -378,6 +378,190 @@ function testChallengeGatedHostsRankBehindResolvableOnes() {
   );
 }
 
+/**
+ * RESOLUTION names the encoded frame, and encoders reach a ladder rung from either
+ * side. These are the shapes the live sources are actually serving, taken off real
+ * masters in July 2026: 1920x1040 and 1920x968 keep the rung's width and crop the
+ * height, 1432x720 and 1280x674 keep the height and widen the frame. Reading the
+ * height alone printed "1040p", "968p" and "674p" — labels naming no rung a viewer
+ * or a player recognises — and gave a 1080p-class encode a sort key well below the
+ * rung it belongs to.
+ */
+function testResolutionMapsToTheRungAPlayerWouldName() {
+  const manifest = (resolution) => (
+    `#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=${resolution}\nv.m3u8\n`
+  );
+  const rung = (resolution) => formatQuality(qualityFromManifest(manifest(resolution)));
+
+  // Observed live.
+  assert.strictEqual(rung('1920x1040'), '1080p', 'width-kept scope encode is 1080p');
+  assert.strictEqual(rung('1920x968'), '1080p', 'so is a taller matte');
+  assert.strictEqual(rung('1280x674'), '720p', 'height-kept scope encode is 720p');
+  assert.strictEqual(rung('1432x720'), '720p', 'a widened 720p frame is still 720p');
+
+  // Common scope masterings.
+  assert.strictEqual(rung('1920x800'), '1080p', '2.40:1 at full 1080p width is 1080p');
+  assert.strictEqual(rung('1920x816'), '1080p');
+  assert.strictEqual(rung('1280x536'), '720p');
+  assert.strictEqual(rung('3840x1608'), '2160p');
+
+  // Exact rungs must come through untouched.
+  for (const [resolution, expected] of [
+    ['1920x1080', '1080p'], ['1280x720', '720p'], ['854x480', '480p'],
+    ['640x360', '360p'], ['2560x1440', '1440p'], ['3840x2160', '2160p'],
+    ['1600x900', '900p'], ['426x240', '240p']
+  ]) {
+    assert.strictEqual(rung(resolution), expected, `${resolution} is exactly ${expected}`);
+  }
+
+  // Taller than 16:9: the width understates these, so the frame's area decides.
+  assert.strictEqual(rung('1440x1080'), '1080p', '4:3 HD is 1080p');
+  assert.strictEqual(rung('640x480'), '480p', '4:3 SD is 480p');
+  assert.strictEqual(rung('1024x768'), '720p', 'XGA is 720p-class, not 576p');
+
+  // And the ranking that follows from it.
+  const rank = (resolution) => require('./src/quality').qualityRank(qualityFromManifest(manifest(resolution)));
+  assert(
+    rank('1920x800') > rank('1280x720'),
+    'a 1080p scope encode must outrank a 720p one'
+  );
+  assert.strictEqual(
+    rank('1280x674'), rank('1280x720'),
+    'and a letterboxed 720p ranks with the rung it belongs to'
+  );
+}
+
+/**
+ * A probe that ran out of time has not judged the stream — but its verdict was
+ * reported the same way a refusal is, and the caller drops whatever comes back
+ * false. Measured against the live sources, three of four streams discarded this
+ * way were serving a playable manifest moments later on the same tokens. They
+ * belong after the confirmed streams, not in the bin.
+ */
+async function testTimedOutProbesLeaveTheStreamUnproven() {
+  const { __test } = scrapers;
+  const slow = await startServer((req, res) => {
+    if (req.url.startsWith('/slow')) {
+      // Headers, then silence: the shape that trips a body deadline.
+      res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
+      res.write('#EXTM3U\n');
+      return;
+    }
+    res.writeHead(404).end();
+  });
+
+  try {
+    const port = slow.address().port;
+    hostHealth.clear();
+
+    const validator = __test.createStreamValidator(new AbortController().signal);
+    const verdict = await validator.validate({ url: `http://127.0.0.1:${port}/slow.m3u8`, title: 'slow' });
+
+    assert.strictEqual(verdict.playable, false, 'a stalled probe does not confirm the stream');
+    assert.strictEqual(
+      verdict.conclusive,
+      false,
+      'but it must not claim to have judged it either'
+    );
+
+    // A refusal, by contrast, is a real finding and stays conclusive.
+    const refused = await validator.validate({ url: `http://127.0.0.1:${port}/gone.m3u8`, title: 'gone' });
+    assert.strictEqual(refused.playable, false);
+    assert.strictEqual(refused.conclusive, true, 'a 404 is a verdict');
+  } finally {
+    hostHealth.clear();
+    slow.close();
+  }
+}
+
+/**
+ * And the selection has to act on that distinction: an unverified stream is still
+ * offered, ranked behind everything that was confirmed.
+ */
+async function testUnverifiedStreamsAreStillOffered() {
+  const { __test } = scrapers;
+  const origin = await startServer((req, res) => {
+    if (req.url.startsWith('/good')) {
+      res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
+      res.end('#EXTM3U\n#EXTINF:4,\nseg.ts\n');
+      return;
+    }
+    if (req.url.startsWith('/stalls')) {
+      res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
+      res.write('#EXTM3U\n');
+      return;
+    }
+    res.writeHead(404, { 'Content-Type': 'text/html' }).end('<html>gone</html>');
+  });
+
+  try {
+    const port = origin.address().port;
+    hostHealth.clear();
+
+    const streams = [
+      { name: 'A', title: 'good', url: `http://127.0.0.1:${port}/good.m3u8` },
+      { name: 'B', title: 'stalls', url: `http://127.0.0.1:${port}/stalls.m3u8` },
+      { name: 'C', title: 'refused', url: `http://127.0.0.1:${port}/refused.m3u8` }
+    ];
+
+    const controller = new AbortController();
+    const validator = __test.createStreamValidator(controller.signal);
+    const selected = await __test.validatePlayableStreams(streams, validator, controller);
+    const urls = selected.map((stream) => stream.url);
+
+    assert(urls.includes(`http://127.0.0.1:${port}/good.m3u8`), 'the confirmed stream is offered');
+    assert(
+      urls.includes(`http://127.0.0.1:${port}/stalls.m3u8`),
+      'the stream that could not be verified is offered too'
+    );
+    assert(
+      !urls.includes(`http://127.0.0.1:${port}/refused.m3u8`),
+      'the stream that was actually refused is dropped'
+    );
+    assert.strictEqual(urls[0], `http://127.0.0.1:${port}/good.m3u8`, 'confirmed comes first');
+  } finally {
+    hostHealth.clear();
+    origin.close();
+  }
+}
+
+/**
+ * These sources sit behind Cloudflare almost without exception, and when an origin
+ * is down the edge answers 520-526 rather than 502. Counting only the standard
+ * bad-gateway family meant a host serving 522 to every request never accumulated
+ * the failures that take it out of rotation, so every lookup kept paying for it.
+ */
+async function testCloudflareOriginErrorsCountAsGatewayFailures() {
+  const { __test } = scrapers;
+  const origin = await startServer((req, res) => {
+    res.writeHead(522, { 'Content-Type': 'text/html' });
+    res.end('<html>origin down</html>');
+  });
+
+  try {
+    const port = origin.address().port;
+    __test.hostHealth.clear();
+
+    const validator = __test.createStreamValidator(new AbortController().signal);
+    // Three gateway failures is what marks a host dead.
+    for (const n of [1, 2, 3]) {
+      await validator.validate({ url: `http://127.0.0.1:${port}/s${n}.m3u8`, title: `s${n}` });
+    }
+
+    const health = __test.hostHealth.get('127.0.0.1');
+    assert(health, 'the host accumulated health events');
+    assert.deepStrictEqual(
+      health.events.map((event) => event.outcome),
+      ['gateway-fail', 'gateway-fail', 'gateway-fail'],
+      'a Cloudflare origin error is a gateway failure'
+    );
+    assert(health.deadUntil > Date.now(), 'and three of them take the host out of rotation');
+  } finally {
+    __test.hostHealth.clear();
+    origin.close();
+  }
+}
+
 (async () => {
   testForwardedProtoListIsNotPastedIntoTheBaseUrl();
   console.log('ok - X-Forwarded-Proto lists do not corrupt rewritten manifest URLs');
@@ -399,6 +583,18 @@ function testChallengeGatedHostsRankBehindResolvableOnes() {
 
   testChallengeGatedHostsRankBehindResolvableOnes();
   console.log('ok - challenge-gated hosts rank behind ones that resolve');
+
+  testResolutionMapsToTheRungAPlayerWouldName();
+  console.log('ok - RESOLUTION maps to the rung a player would name');
+
+  await testTimedOutProbesLeaveTheStreamUnproven();
+  console.log('ok - a timed-out probe reports that it judged nothing');
+
+  await testUnverifiedStreamsAreStillOffered();
+  console.log('ok - unverified streams are offered behind the confirmed ones');
+
+  await testCloudflareOriginErrorsCountAsGatewayFailures();
+  console.log('ok - Cloudflare origin errors count as gateway failures');
 
   console.log('\nPlayback regression tests passed');
 })().catch((error) => {

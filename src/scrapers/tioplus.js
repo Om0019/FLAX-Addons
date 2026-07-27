@@ -169,7 +169,11 @@ async function mapWithConcurrencyUntilEnough(items, concurrency, worker, options
       }
 
       if (fastReturnEnabled && results.length >= minResults) {
-        console.log(`TioPlus: Returning ${results.length} fast token results; slow tokens still pending.`);
+        // Workers already in flight keep landing here after the first one settles
+        // this, and each was announcing a return that had already happened.
+        if (!settled) {
+          console.log(`TioPlus: Returning ${results.length} fast token results; slow tokens still pending.`);
+        }
         finish();
       }
     };

@@ -133,8 +133,14 @@ function isHardDeadStatus(status) {
   return [404, 410, 451].includes(status);
 }
 
+// 502/503/504 are the standard bad-gateway family. 520-526 are Cloudflare's own
+// codes for the same condition — the edge answered but could not reach the origin
+// behind it — and these sources sit behind Cloudflare almost without exception, so
+// leaving them out meant a host whose origin was down (hglink.to and
+// vidhideplus.com were both serving 522 when this was measured) never accumulated
+// the failures that take it out of rotation.
 function isGatewayFailureStatus(status) {
-  return [502, 503, 504].includes(status);
+  return [502, 503, 504].includes(status) || (status >= 520 && status <= 526);
 }
 
 function recordHostHealth(stream, outcome, details = {}) {
@@ -670,9 +676,24 @@ function isHlsManifestProbe(response, streamUrl) {
  * learned about its quality on the way. Returning both keeps the manifest read
  * free — the body is in hand for the playability checks either way, and fetching
  * it again later to look at RESOLUTION would double the request count.
+ *
+ * `conclusive` says whether the probe actually learned anything. A refusal, an
+ * empty playlist and a dead variant are findings about the stream; a deadline that
+ * expired and a probe that was cancelled are findings about our budget. Both used
+ * to be reported the same way, and the caller drops whatever comes back false, so
+ * a stream the probe never got an answer from was thrown away as if it had failed.
  */
-function verdict(playable, quality = null) {
-  return { playable, quality };
+function verdict(playable, quality = null, { conclusive = true } = {}) {
+  return { playable, quality, conclusive };
+}
+
+/**
+ * Whether a thrown fetch error is a finding about the stream. A host that does not
+ * resolve or refuses the connection is a definite answer; a deadline is not. Kept
+ * in step with probeHlsVariant, which draws the same line on the same codes.
+ */
+function isDefiniteFetchFailure(error) {
+  return ['ENOTFOUND', 'ECONNREFUSED', 'ERR_INVALID_URL'].includes(error?.cause?.code || '');
 }
 
 async function isPlayableStream(stream, signal) {
@@ -793,14 +814,19 @@ async function isPlayableStream(stream, signal) {
     // 2KB range from the front reliably reaches, so this is the URL's word for it.
     return verdict(playable, redirectedQuality);
   } catch (error) {
+    // Cancelled because the selection moved on. That says nothing about the stream.
     if (error.message.startsWith('Fetch aborted:')) {
-      return verdict(false);
+      return verdict(false, null, { conclusive: false });
     }
-    console.log(`Scraper orchestrator: Filtering stream that failed validation: ${stream.url} (${error.message})`);
-    recordHostHealth(stream, error.message.includes('timeout') ? 'timeout' : 'soft-fail', {
+
+    const timedOut = error.message.includes('timeout');
+    console.log(`Scraper orchestrator: ${timedOut ? 'Could not verify' : 'Filtering'} stream: ${stream.url} (${error.message})`);
+    // Health still counts a timeout — a host that keeps running out the clock is a
+    // bad bet even though no single timeout proves anything about one stream.
+    recordHostHealth(stream, timedOut ? 'timeout' : 'soft-fail', {
       latencyMs: Date.now() - startedAt
     });
-    return verdict(false);
+    return verdict(false, null, { conclusive: !timedOut && isDefiniteFetchFailure(error) });
   }
 }
 
@@ -828,7 +854,8 @@ function createStreamValidator(signal, onConfirmed) {
         if (!error.message.startsWith('Fetch aborted:')) {
           recordHostHealth(stream, 'soft-fail');
         }
-        return verdict(false);
+        // A probe that threw where it was not supposed to has not judged anything.
+        return verdict(false, null, { conclusive: false });
       }).then((result) => {
         // Counted here rather than at the call site because probes are shared: the
         // eager pass and the final selection await the same promise, and a stream
@@ -906,7 +933,7 @@ async function validatePlayableStreams(streams, validator, validationController)
     // Already-settled probes resolve immediately; this is where work done during
     // collection gets picked up rather than repeated.
     validator.validate(stream)
-      .then(({ playable, quality }) => {
+      .then(({ playable, quality, conclusive }) => {
         if (playable) {
           // The probe read the manifest, so this is the one point where a claim can
           // be replaced by a measurement.
@@ -916,7 +943,11 @@ async function validatePlayableStreams(streams, validator, validationController)
           }
           return;
         }
-        rejectedUrls.add(stream.url);
+        // Only a probe that reached a verdict drops its stream. One that ran out of
+        // time leaves it unproven, which is a place in the list rather than a
+        // deletion: measured live, three of four streams the deadline discarded were
+        // serving a playable manifest a moment later.
+        if (conclusive) rejectedUrls.add(stream.url);
       })
       .finally(() => {
         completed += 1;
@@ -1173,6 +1204,7 @@ module.exports = {
     hostHealth,
     createStreamValidator,
     startEagerValidation,
+    validatePlayableStreams,
     firstVariantUrl,
     isMasterPlaylist,
     sortStreams
