@@ -132,7 +132,14 @@ async function mapWithConcurrencyUntilEnough(items, concurrency, worker, options
   let minWaitTimer = null;
   let timeoutTimer = null;
 
-  const minResults = options.minResults || Infinity;
+  let minResults = options.minResults || Infinity;
+  // What the wait deadline drops the target to. Passing the deadline used to only
+  // enable the fast return while leaving the target at three, and this source
+  // resolves one or two tokens in practice — the rest are wrappers that answer with
+  // a timeout — so the target was never met and the deadline changed nothing. A
+  // stream that resolved at 2.5s was handed over at 7.5s, by which point the
+  // orchestrator had already returned without it.
+  const relaxedMinResults = options.relaxedMinResults || 1;
   const minWaitMs = options.minWaitMs || 0;
   const timeoutMs = options.timeoutMs || 0;
   const signal = options.signal;
@@ -170,6 +177,7 @@ async function mapWithConcurrencyUntilEnough(items, concurrency, worker, options
     if (minWaitMs > 0) {
       minWaitTimer = setTimeout(() => {
         fastReturnEnabled = true;
+        minResults = Math.min(minResults, relaxedMinResults);
         maybeFinish();
       }, minWaitMs);
     } else {
@@ -486,5 +494,5 @@ async function scrape(title, originalTitle, year, type, season, episode, options
 
 module.exports = {
   scrape,
-  __test: { toSearchQuery }
+  __test: { toSearchQuery, mapWithConcurrencyUntilEnough }
 };
