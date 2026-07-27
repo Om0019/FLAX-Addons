@@ -67,6 +67,35 @@ function* iterUnpackedScripts(html) {
   }
 }
 
+// Assets that look like streams but never are: analytics bundles, and the sample
+// clips player templates ship with. Matched as substrings because they only ever
+// appear in one form.
+const NON_STREAM_MARKERS = [
+  'google-analytics',
+  'analytics.js',
+  'tagmanager',
+  'test-videos.co.uk',
+  'big_buck_bunny'
+];
+
+// Ad hosts and ad paths, matched on segment boundaries. A bare `includes('ads')`
+// also matches "uploads" and "downloads", which is where a large share of real
+// stream URLs live — that check threw away the stream it was meant to protect.
+const AD_SEGMENT_PATTERN = /(?:^|[/.])(?:ads?|advert(?:s|ising)?|adserver|doubleclick)(?:[/.]|$)/;
+
+/** True when a URL looks like a real media asset rather than an ad or analytics one. */
+function isPlausibleStreamUrl(link) {
+  const lower = String(link || '').toLowerCase();
+  if (NON_STREAM_MARKERS.some((marker) => lower.includes(marker))) return false;
+
+  try {
+    const parsed = new URL(lower);
+    return !AD_SEGMENT_PATTERN.test(`${parsed.hostname}${parsed.pathname}`);
+  } catch {
+    return !AD_SEGMENT_PATTERN.test(lower);
+  }
+}
+
 /**
  * Parses HTML, finds any packed scripts, unpacks them, and looks for .m3u8/.mp4 stream URLs.
  * Also scans the HTML directly for any un-packed stream URLs as a fallback.
@@ -118,14 +147,7 @@ function extractDirectStream(html, baseUrl) {
     ...protocolRelativeMatches,
     ...relativeMatches,
     ...configuredMatches
-  ].map((link) => normalizeUrl(link, baseUrl)).filter(Boolean).filter(link => {
-    const l = link.toLowerCase();
-    return !l.includes('google-analytics')
-      && !l.includes('analytics.js')
-      && !l.includes('tagmanager')
-      && !l.includes('test-videos.co.uk')
-      && !l.includes('big_buck_bunny');
-  });
+  ].map((link) => normalizeUrl(link, baseUrl)).filter(Boolean).filter(isPlausibleStreamUrl);
 
   if (validDirect.length > 0) {
     return [...new Set(validDirect)][0];
@@ -134,13 +156,7 @@ function extractDirectStream(html, baseUrl) {
   // 2. Scan and unpack packed scripts (e.g. vidhide, hlswish, vimeos)
   for (const unpacked of iterUnpackedScripts(normalizedHtml)) {
     const streamMatches = unpacked.match(directRegex) || [];
-    const validStreams = streamMatches.map((link) => normalizeUrl(link, baseUrl)).filter(Boolean).filter(link => {
-      const l = link.toLowerCase();
-      return !l.includes('analytics')
-        && !l.includes('ads')
-        && !l.includes('test-videos.co.uk')
-        && !l.includes('big_buck_bunny');
-    });
+    const validStreams = streamMatches.map((link) => normalizeUrl(link, baseUrl)).filter(Boolean).filter(isPlausibleStreamUrl);
 
     if (validStreams.length > 0) {
       return [...new Set(validStreams)][0];
@@ -253,12 +269,14 @@ function isFileLockerServer(server) {
 function scoreXupalaceServer(server) {
   const s = (server || '').toLowerCase();
   if (s.includes('streamwish') || s.includes('hlswish') || s.includes('vidhide')) return 0;
-  if (s.includes('filemoon')) return 1;
   if (s.includes('dood')) return 2;
   if (s.includes('voe')) return 4;
   if (s.includes('vidguard') || s.includes('listeamed')) return 4;
   if (s.includes('waaw') || s.includes('netu') || s.includes('hqq')) return 5;
   if (s.includes('lulu') || s.includes('vudeo') || s.includes('ahvsh') || s.includes('streamhide')) return 5;
+  // Filemoon gates playback behind a captcha no server-side resolver can answer
+  // (see resolveFilemoon), so it is tried only once everything else has failed.
+  if (s.includes('filemoon')) return 6;
   return 3;
 }
 
@@ -877,45 +895,101 @@ function extractFilemoonCode(url) {
   }
 }
 
+function buildFilemoonApiUrl(url, code, path) {
+  return new URL(`/api/videos/${encodeURIComponent(code)}/${path}`, url).toString();
+}
+
+function buildFilemoonHeaders(url, userAgent, referer) {
+  return {
+    'User-Agent': userAgent,
+    'Referer': url,
+    'Origin': new URL(url).origin,
+    'Accept': 'application/json',
+    'X-Embed-Origin': referer ? getHostname(referer) : '',
+    'X-Embed-Referer': referer || url,
+    'X-Embed-Parent': referer || url
+  };
+}
+
+/**
+ * The player posts a device attestation alongside the playback request. Its
+ * contents are only used for abuse scoring — the request is refused outright
+ * without one — so a per-request identifier is enough to get a verdict back.
+ */
+function buildFilemoonFingerprint() {
+  return {
+    token: crypto.randomBytes(16).toString('hex'),
+    viewer_id: crypto.randomUUID(),
+    device_id: crypto.randomUUID(),
+    confidence: 0
+  };
+}
+
+/**
+ * Filemoon's embed is a single-page app — the stream is never in the HTML, so the
+ * generic extractor has nothing to work with and the JSON API below is the only
+ * route to it.
+ *
+ * The request shape is taken from the current player bundle
+ * (`/assets/videoPagesBundle-*.js`): the URL is built same-origin as
+ * `/api/videos/<code>/embed/playback`, and playback is a POST carrying a
+ * `fingerprint` object. A GET — which is what this used to send — is answered
+ * `405 method not allowed`, as is a POST without the fingerprint.
+ *
+ * Getting a stream back also needs `captcha_required` to be false for the file.
+ * When it is true the server answers `428 captcha_required` unless an
+ * `X-Captcha-Token` from a solved reCAPTCHA is attached, which cannot be produced
+ * server-side. Every file sampled in July 2026 was gated this way, so the settings
+ * probe short-circuits those rather than spending a second round-trip to be
+ * refused. If that policy ever relaxes, the playback path below is ready for it.
+ */
 async function resolveFilemoon(url, userAgent, referer, signal) {
   if (!isFilemoonHost(url)) return null;
 
   const code = extractFilemoonCode(url);
   if (!code) return null;
 
-  const apiPaths = [
-    `/api/videos/${encodeURIComponent(code)}/embed/playback`,
-    `/api/videos/${encodeURIComponent(code)}/playback`
-  ];
+  const headers = buildFilemoonHeaders(url, userAgent, referer);
 
-  for (const path of apiPaths) {
-    try {
-      const apiUrl = new URL(path, url).toString();
-      const { res, text } = await fetchTextWithTimeout(apiUrl, {
-        headers: {
-          'User-Agent': userAgent,
-          'Referer': url,
-          'Origin': new URL(url).origin,
-          'Accept': 'application/json',
-          'X-Embed-Origin': referer ? getHostname(referer) : '',
-          'X-Embed-Referer': referer || url,
-          'X-Embed-Parent': referer || url
-        },
-        signal
-      }, FILEMOON_API_TIMEOUT_MS);
-      if (!res.ok) continue;
+  try {
+    const { res, text } = await fetchTextWithTimeout(
+      buildFilemoonApiUrl(url, code, 'embed/settings'),
+      { headers, signal },
+      FILEMOON_API_TIMEOUT_MS
+    );
+    if (!res.ok) return null;
 
-      const data = JSON.parse(text);
-      const playback = data.playback || data;
-      const decrypted = decryptFilemoonPayload(playback);
-      const sources = Array.isArray(decrypted?.sources) ? decrypted.sources : [];
-      const direct = sources
-        .map((source) => source?.url)
-        .find((sourceUrl) => /\.(m3u8|mp4|mkv)(?:$|[?#])/i.test(sourceUrl || ''));
-      if (direct) return normalizeUrl(direct, url);
-    } catch (error) {
-      console.warn(`Unpacker: Filemoon API resolve failed for ${url}: ${error.message}`);
+    if (JSON.parse(text)?.captcha_required) {
+      console.log(`Unpacker: Filemoon ${code} requires a captcha; skipping.`);
+      return null;
     }
+  } catch (error) {
+    console.warn(`Unpacker: Filemoon settings probe failed for ${url}: ${error.message}`);
+    return null;
+  }
+
+  try {
+    const { res, text } = await fetchTextWithTimeout(
+      buildFilemoonApiUrl(url, code, 'embed/playback'),
+      {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fingerprint: buildFilemoonFingerprint() }),
+        signal
+      },
+      FILEMOON_API_TIMEOUT_MS
+    );
+    if (!res.ok) return null;
+
+    const data = JSON.parse(text);
+    const decrypted = decryptFilemoonPayload(data.playback || data);
+    const sources = Array.isArray(decrypted?.sources) ? decrypted.sources : [];
+    const direct = sources
+      .map((source) => source?.url)
+      .find((sourceUrl) => /\.(m3u8|mp4|mkv)(?:$|[?#])/i.test(sourceUrl || ''));
+    if (direct) return normalizeUrl(direct, url);
+  } catch (error) {
+    console.warn(`Unpacker: Filemoon API resolve failed for ${url}: ${error.message}`);
   }
 
   return null;
@@ -982,7 +1056,8 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
         if (isVoeHost(url) && html.includes('generate-token') && !url.includes('permanentToken=')) {
             const tokenUrl = addVoePermanentToken(url);
             if (tokenUrl && tokenUrl !== url) {
-                return await resolvePlayerStream(tokenUrl, userAgent, referer, { depth: depth + 1, visited, signal });
+                const tokenDirectUrl = await resolvePlayerStream(tokenUrl, userAgent, referer, { depth: depth + 1, visited, signal });
+                if (tokenDirectUrl) return tokenDirectUrl;
             }
         }
 
@@ -1041,12 +1116,16 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
                         const server = (value.server || '').toLowerCase();
                         if (server === 'vidhide' || server === 'streamwish' || server === 'hlswish') return 0;
                         if (server === 'rapidvideo') return 1;
-                        if (server === 'filemoon') return 2;
                         if (server === 'dood' || server === 'doodstream' || server === 'doodstreaming') return 3;
                         if (server === 'voe') return 5;
                         if (server === 'vidguard' || server === 'listeamed') return 5;
                         if (server === 'luluvdo' || server === 'vudeo' || server === 'streamhide') return 6;
                         if (server === 'netu' || server === 'waaw' || server === 'hqq') return 7;
+                        // Filemoon gates playback behind a captcha no server-side
+                        // resolver can answer (see resolveFilemoon). It ranked 2nd
+                        // here, so it burned one of MAX_EMBED69_ATTEMPTS on every
+                        // page that listed it.
+                        if (server === 'filemoon') return 8;
                         return 2;
                     };
                     return kindScore(a) - kindScore(b) || serverScore(a) - serverScore(b);
@@ -1076,12 +1155,16 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
             }
         }
 
-        // Check for JS redirect (e.g. VOE initial page)
+        // Check for JS redirect (e.g. VOE initial page). The match is not necessarily
+        // the page's real navigation — adblock detectors and back-button handlers
+        // assign location.href too — so a redirect that leads nowhere must fall
+        // through to this page's own extraction rather than end the resolve.
         const jsRedirectMatch = html.match(/(?:(?:window|self)\.)?location(?:\.href)?\s*=\s*['"]([^'"]+)['"]|(?:(?:window|self)\.)?location\.(?:replace|assign)\s*\(\s*['"]([^'"]+)['"]\s*\)/);
         const redirectUrl = normalizeUrl(jsRedirectMatch?.[1] || jsRedirectMatch?.[2], url);
         if (redirectUrl && redirectUrl !== url && isHttpUrl(redirectUrl)) {
             console.log(`Unpacker: Following JS redirect to ${redirectUrl}`);
-            return await resolvePlayerStream(redirectUrl, userAgent, referer, { depth: depth + 1, visited, signal });
+            const redirectDirectUrl = await resolvePlayerStream(redirectUrl, userAgent, referer, { depth: depth + 1, visited, signal });
+            if (redirectDirectUrl) return redirectDirectUrl;
         }
 
         const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
@@ -1133,6 +1216,7 @@ async function resolveDownloadUrl(url, userAgent, referer, options = {}) {
 module.exports = {
   __test: {
     decodeVidguardSignature,
+    decryptFilemoonPayload,
     extractMediafireDirectUrl,
     extractVidguardStream,
     extractVoeDirectStream,

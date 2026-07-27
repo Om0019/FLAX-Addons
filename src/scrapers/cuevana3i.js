@@ -115,9 +115,11 @@ function scoreDecodedWrapper(wrapperUrl) {
   })();
 
   if (host.includes('tiktokshopping.xyz')) return 0;
-  if (host.includes('filemoon')) return 7;
   if (host.includes('dood')) return 8;
   if (host.includes('vidlink.pro') || host.includes('vidapi.xyz') || host.includes('videasy') || host.includes('vsembed')) return 9;
+  // Filemoon gates playback behind a captcha no server-side resolver can answer
+  // (see resolveFilemoon), so it is tried only once everything else has failed.
+  if (host.includes('filemoon')) return 10;
   return 4;
 }
 

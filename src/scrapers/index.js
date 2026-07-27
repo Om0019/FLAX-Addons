@@ -435,6 +435,40 @@ function isHtmlResponse(response) {
   return (response.headers.get('content-type') || '').toLowerCase().includes('text/html');
 }
 
+/**
+ * Whether a probe should be judged as an HLS playlist — by extension, or by the
+ * content type when the URL carries no extension at all.
+ *
+ * Routing on `url.includes('.m3u8')` got this wrong both ways. A playlist served
+ * from a path with no extension (`/hls/master?token=…`, which several of these
+ * hosts do) fell through to the generic check, where a manifest content type
+ * satisfies neither `video/*` nor an attachment disposition, and a perfectly good
+ * stream was recorded as unplayable. In the other direction, an unrelated `.m3u8`
+ * anywhere in a query string forced an MP4 down the playlist path, where the body
+ * has no #EXTM3U and it was dropped for it.
+ */
+function hasM3u8Path(url) {
+  if (!url) return false;
+
+  try {
+    // Deliberately the pathname alone. Matching the whole URL means a query
+    // parameter that happens to end in .m3u8 — a fallback URL, a referrer — drags
+    // an MP4 onto the playlist path.
+    return /\.m3u8$/i.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isHlsManifestProbe(response, streamUrl) {
+  const contentType = (response.headers.get('content-type') || '').toLowerCase();
+  if (contentType.includes('mpegurl') || contentType.includes('application/vnd.apple')) {
+    return true;
+  }
+
+  return hasM3u8Path(response.url) || hasM3u8Path(streamUrl);
+}
+
 async function isPlayableStream(stream, signal) {
   const startedAt = Date.now();
   const headers = {
@@ -473,7 +507,7 @@ async function isPlayableStream(stream, signal) {
       return false;
     }
 
-    if (stream.url.toLowerCase().includes('.m3u8')) {
+    if (isHlsManifestProbe(response, stream.url)) {
       if (isHtmlResponse(response)) {
         recordHostHealth(stream, 'soft-fail', {
           status: response.status,
@@ -582,6 +616,10 @@ async function validatePlayableStreams(streams, validator, validationController)
   }
 
   const playableStreams = [];
+  // Probes that came back with a real verdict of "not playable". Kept apart from
+  // the ones still in flight, because an aborted probe also resolves false and
+  // that is not evidence of anything.
+  const rejectedUrls = new Set();
   let completed = 0;
   let resolveEnoughConfirmed;
   let resolveAllComplete;
@@ -603,7 +641,9 @@ async function validatePlayableStreams(streams, validator, validationController)
           if (playableStreams.length >= MIN_CONFIRMED_STREAMS) {
             resolveEnoughConfirmed('enough-confirmed');
           }
+          return;
         }
+        rejectedUrls.add(stream.url);
       })
       .finally(() => {
         completed += 1;
@@ -622,22 +662,38 @@ async function validatePlayableStreams(streams, validator, validationController)
     new Promise((resolve) => setTimeout(() => resolve('timeout'), timeoutMs))
   ]);
 
+  // Snapshot before aborting. Every probe that reached a verdict has already run
+  // its handler; the ones abort() is about to cancel resolve later and must not be
+  // mistaken for failures.
+  const decidedBad = new Set(rejectedUrls);
+
   if (completionReason !== 'complete') {
     validationController.abort();
   }
 
-  if (playableStreams.length > 0) {
-    if (completionReason === 'timeout') {
-      console.warn(`Scraper orchestrator: Validation timed out; returning ${playableStreams.length} confirmed playable streams and dropping slow candidates.`);
-    }
-    return sortStreams(playableStreams);
+  // MIN_CONFIRMED_STREAMS ends validation early, which is what keeps the response
+  // fast — but it used to end the *result* too, so a lookup that found five working
+  // links returned three and threw the rest away. Only a stream that actually failed
+  // its probe is dropped now; the ones still in flight, and the ones past the
+  // candidate cap, follow the confirmed streams instead of vanishing.
+  const confirmed = sortStreams(playableStreams);
+  const confirmedUrls = new Set(confirmed.map((stream) => stream.url));
+  const unproven = [...eligibleStreams, ...skippedStreams].filter((stream) => (
+    !confirmedUrls.has(stream.url) && !decidedBad.has(stream.url)
+  ));
+
+  if (completionReason === 'timeout' && confirmed.length > 0) {
+    console.warn(`Scraper orchestrator: Validation timed out; ${confirmed.length} confirmed playable, ${unproven.length} unverified candidates kept.`);
   }
 
-  if (remainingStreams.length > 0) {
-    console.warn('Scraper orchestrator: No validated streams yet; returning URL-sanitized streams to avoid a false empty result.');
-    return sortedStreams;
+  const selected = [...confirmed, ...unproven];
+  if (selected.length > 0) {
+    return selected;
   }
 
+  // Everything that was probed failed. Validation has false negatives — hosts that
+  // refuse the Range probe but play fine — so an empty list here is more likely to
+  // be wrong than the candidates are.
   if (sortedStreams.length > 0) {
     console.warn('Scraper orchestrator: Validation found no confirmed playable streams; returning URL-sanitized streams to avoid a false empty result.');
   }

@@ -3,11 +3,13 @@
 // in CI rather than silently returning zero streams from a live source.
 
 const assert = require('assert');
+const crypto = require('crypto');
 const http = require('http');
-const { resolvePlayerStream, resolveDownloadUrl, __test } = require('./src/unpacker');
+const { extractDirectStream, resolvePlayerStream, resolveDownloadUrl, __test } = require('./src/unpacker');
 
 const {
   decodeVidguardSignature,
+  decryptFilemoonPayload,
   extractMediafireDirectUrl,
   extractVidguardStream,
   extractVoeDirectStream,
@@ -272,6 +274,207 @@ function testUnpackedScriptIteration() {
   assert.deepStrictEqual([...iterUnpackedScripts('<html>no scripts</html>')], [], 'a page with no packed script yields nothing');
 }
 
+/** Builds a Dean Edwards packed script carrying `url` as its player config. */
+function packStreamConfig(url) {
+  const dictionary = ['file', ...url.replace(/^https:\/\//, '').split(/[/.]/)];
+  const body = `{0:"https://${url.replace(/^https:\/\//, '').replace(/[^/.]+/g, (word) => dictionary.indexOf(word))}"}`;
+  return `<script>eval(function(p,a,c,k,e,d){}('${body}',62,${dictionary.length},'${dictionary.join('|')}'.split('|')))</script>`;
+}
+
+// A bare includes('ads') check also fires on "uploads" and "downloads" — the two
+// most common path segments real stream URLs sit under — so it discarded the
+// stream it was meant to protect. Ad hosts and ad path segments still go.
+function testPackedStreamAdFilter() {
+  const kept = [
+    'https://cdn.example.net/uploads/master.m3u8',
+    'https://cdn.example.net/downloads/movie.mp4',
+    'https://cdn.example.net/hls2/master.m3u8'
+  ];
+
+  for (const url of kept) {
+    assert.strictEqual(
+      extractDirectStream(packStreamConfig(url), 'https://host.example/e/abc'),
+      url,
+      `a packed stream under ${new URL(url).pathname} survives the ad filter`
+    );
+  }
+
+  for (const url of ['https://ads.example.net/preroll.mp4', 'https://cdn.example.net/ads/preroll.mp4']) {
+    assert.strictEqual(
+      extractDirectStream(packStreamConfig(url), 'https://host.example/e/abc'),
+      null,
+      `a genuine ad asset (${url}) is still rejected`
+    );
+  }
+
+  // The unpacked path has to agree with the packed one; they used to apply
+  // different filters to the same URL.
+  assert.strictEqual(
+    extractDirectStream('<script>file:"https://ads.example.net/preroll.mp4"</script>', 'https://host.example/e/abc'),
+    null,
+    'the unpacked path rejects ad assets too'
+  );
+}
+
+// An adblock detector or back-button handler assigns location.href on pages that
+// are not redirect stubs at all. Following it is right; ending the resolve when it
+// leads nowhere threw away a page whose stream was sitting right there.
+async function testDeadJsRedirectFallsThrough() {
+  const source = 'https://cdn.example.net/hls/master.m3u8';
+
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    if (req.url.startsWith('/blocked')) {
+      res.end('<html><body>nothing here</body></html>');
+      return;
+    }
+    res.end(`<html><script>if (window.adblockDetected) { window.location.href = "/blocked"; }</script>
+      <script>jwplayer("p").setup({file:"${source}"});</script></html>`);
+  });
+
+  await new Promise((resolve) => server.listen(0, resolve));
+
+  try {
+    const resolved = await resolvePlayerStream(
+      `http://127.0.0.1:${server.address().port}/player`,
+      userAgent,
+      'https://tioplus.app/'
+    );
+    assert.strictEqual(resolved, source, 'a redirect that leads nowhere still leaves the page extractable');
+  } finally {
+    server.close();
+  }
+}
+
+function base64Url(buffer) {
+  return buffer.toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+}
+
+/**
+ * Builds a Filemoon playback payload the way its API does: AES-GCM over the JSON,
+ * with the key split across `key_parts` and `version` naming which two entries to
+ * reassemble it from.
+ */
+function buildFilemoonPayload(data, { version, partCount = 30 } = {}) {
+  const parts = Array.from({ length: partCount }, () => crypto.randomBytes(16));
+  const index = Number(version);
+  const key = Buffer.concat([parts[index - 1], parts[30 - index]]);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(JSON.stringify(data), 'utf8'), cipher.final()]);
+
+  return {
+    version: String(version),
+    key_parts: parts.map(base64Url),
+    iv: base64Url(iv),
+    payload: base64Url(Buffer.concat([encrypted, cipher.getAuthTag()]))
+  };
+}
+
+// The two key parts are picked by `version`, and picking the wrong pair yields a
+// key that fails authentication rather than anything diagnosable. The indices
+// mirror Filemoon's player bundle, which maps version n to the 1-based pair
+// [n, 31 - n]; this pins that mapping so a rewrite cannot quietly shift it.
+function testFilemoonPayloadDecryption() {
+  const sources = [{ url: 'https://cdn.example.net/hls/master.m3u8', quality: '1080p' }];
+
+  for (const version of [1, 3, 15, 20]) {
+    assert.deepStrictEqual(
+      decryptFilemoonPayload(buildFilemoonPayload({ sources }, { version })),
+      { sources },
+      `version ${version} selects the right key parts`
+    );
+  }
+
+  // A version outside the table means the whole key_parts list is the key, which
+  // is only a valid AES key length by accident — it must fail, not throw.
+  const payload = buildFilemoonPayload({ sources }, { version: 3 });
+  assert.strictEqual(
+    decryptFilemoonPayload({ ...payload, version: '99' }),
+    null,
+    'an unknown version does not produce a bogus key'
+  );
+
+  assert.strictEqual(decryptFilemoonPayload({ key_parts: [] }), null, 'an empty payload is rejected');
+}
+
+/** Builds an embed69 page whose dataLink carries the given servers, encrypted the
+ *  way the site does: AES-256-CBC under a key derived from a solved proof-of-work. */
+function buildEmbed69Page(servers) {
+  const challenge = 'challenge';
+  const salt = 'salt';
+  const difficulty = 2;
+
+  let nonce = 0;
+  let key;
+  for (;;) {
+    if (crypto.createHash('sha256').update(challenge + nonce).digest('hex').startsWith('0'.repeat(difficulty))) {
+      key = crypto.createHash('sha256').update(challenge + nonce + salt).digest();
+      break;
+    }
+    nonce += 1;
+  }
+
+  const encrypt = (plain) => {
+    const iv = crypto.randomBytes(16);
+    const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
+    return Buffer.concat([iv, cipher.update(plain, 'utf8'), cipher.final()]).toString('base64');
+  };
+
+  const dataLink = [{
+    sortedEmbeds: servers.map(({ server, url }) => ({ servername: server, type: 'video', link: encrypt(url) }))
+  }];
+
+  return `<script>const POW_CHALLENGE = '${challenge}';
+const POW_DIFFICULTY = ${difficulty};
+const POW_SALT = '${salt}';
+let dataLink = ${JSON.stringify(dataLink)};</script>`;
+}
+
+// embed69 lists more servers than MAX_EMBED69_ATTEMPTS allows, so the ranking
+// decides which ones are ever tried. Filemoon used to rank second despite being
+// unresolvable server-side, spending an attempt on every page that offered it.
+async function testEmbed69RanksFilemoonLast() {
+  const requested = [];
+
+  const server = http.createServer((req, res) => {
+    requested.push(req.url);
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end('<html><body>no stream here</body></html>');
+  });
+
+  await new Promise((resolve) => server.listen(0, resolve));
+
+  try {
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const html = buildEmbed69Page([
+      { server: 'filemoon', url: `${origin}/filemoon` },
+      { server: 'voe', url: `${origin}/voe` },
+      { server: 'vidhide', url: `${origin}/vidhide` }
+    ]);
+
+    const page = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(html);
+    });
+    await new Promise((resolve) => page.listen(0, resolve));
+
+    try {
+      await resolvePlayerStream(`http://127.0.0.1:${page.address().port}/embed69`, userAgent, 'https://sololatino.net/');
+    } finally {
+      page.close();
+    }
+
+    assert.deepStrictEqual(
+      requested,
+      ['/vidhide', '/voe', '/filemoon'],
+      'filemoon is attempted only after the servers that can actually resolve'
+    );
+  } finally {
+    server.close();
+  }
+}
+
 async function run() {
   const tests = [
     ['VOE payload decodes', testVoePayloadDecodes],
@@ -283,7 +486,11 @@ async function run() {
     ['Download resolution is non-destructive', testDownloadUrlResolutionIsNonDestructive],
     ['Embed path normalization', testEmbedPathNormalization],
     ['embed69 server gate', testEmbedServerGate],
-    ['Packed script iteration', testUnpackedScriptIteration]
+    ['Packed script iteration', testUnpackedScriptIteration],
+    ['Packed stream ad filter', testPackedStreamAdFilter],
+    ['Dead JS redirect falls through', testDeadJsRedirectFallsThrough],
+    ['Filemoon payload decryption', testFilemoonPayloadDecryption],
+    ['embed69 ranks Filemoon last', testEmbed69RanksFilemoonLast]
   ];
 
   for (const [label, test] of tests) {

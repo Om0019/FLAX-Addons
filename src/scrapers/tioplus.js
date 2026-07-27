@@ -26,11 +26,13 @@ function scoreServerToken(serverInfo) {
   if (text.includes('opción 1') || text.includes('opcion 1') || text.includes('vidhide')) return 2;
   if (text.includes('lulu') || text.includes('luluvdo')) return 3;
   if (text.includes('hlswish') || text.includes('streamwish')) return 4;
-  if (text.includes('filemoon')) return 8;
   if (text.includes('netu') || text.includes('waaw')) return 9;
   if (text.includes('mobilefast') || text.includes('vudeo')) return 10;
   if (text.includes('hidefast') || text.includes('ahvsh')) return 11;
   if (text.includes('vidg') || text.includes('listeamed')) return 12;
+  // Filemoon gates playback behind a captcha no server-side resolver can answer
+  // (see resolveFilemoon), so it goes last among the direct players.
+  if (text.includes('filemoon')) return 13;
   return 6;
 }
 

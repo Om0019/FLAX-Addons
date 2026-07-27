@@ -1,10 +1,18 @@
 const { fetchWithTimeout } = require('../http');
 
 /**
- * CineHDPlus Scraper
- * Note: cinehdplus.org is currently protected by Cloudflare Turnstile/JS challenge (403).
- * This module handles searches gracefully by logging the status and returning an empty list,
- * keeping the addon responsive and preventing timeouts.
+ * CineHDPlus Scraper — disabled, see ENABLE_CINEHDPLUS in ./index.js.
+ *
+ * cinehdplus.org sits behind a Cloudflare *managed challenge*: every request is
+ * answered 403 with `cf-mitigated: challenge` and a "Just a moment..." interstitial
+ * carrying cf_chl_opt and the challenge-platform script. Verified July 2026,
+ * including with a complete browser header set (Accept, Accept-Language, sec-ch-ua,
+ * Sec-Fetch-*) — headers do not move it, because passing requires executing the
+ * challenge script and returning with a cf_clearance cookie.
+ *
+ * No fetch-based scraper can clear that, so there is nothing to implement here
+ * short of driving a real browser. The probe below stays as a cheap way to notice
+ * if the site is ever taken out from behind the challenge.
  */
 async function scrape(title, originalTitle, year, type, season, episode, options = {}) {
   const { signal } = options;
