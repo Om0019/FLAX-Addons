@@ -435,6 +435,40 @@ function isHtmlResponse(response) {
   return (response.headers.get('content-type') || '').toLowerCase().includes('text/html');
 }
 
+/**
+ * Whether a probe should be judged as an HLS playlist — by extension, or by the
+ * content type when the URL carries no extension at all.
+ *
+ * Routing on `url.includes('.m3u8')` got this wrong both ways. A playlist served
+ * from a path with no extension (`/hls/master?token=…`, which several of these
+ * hosts do) fell through to the generic check, where a manifest content type
+ * satisfies neither `video/*` nor an attachment disposition, and a perfectly good
+ * stream was recorded as unplayable. In the other direction, an unrelated `.m3u8`
+ * anywhere in a query string forced an MP4 down the playlist path, where the body
+ * has no #EXTM3U and it was dropped for it.
+ */
+function hasM3u8Path(url) {
+  if (!url) return false;
+
+  try {
+    // Deliberately the pathname alone. Matching the whole URL means a query
+    // parameter that happens to end in .m3u8 — a fallback URL, a referrer — drags
+    // an MP4 onto the playlist path.
+    return /\.m3u8$/i.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isHlsManifestProbe(response, streamUrl) {
+  const contentType = (response.headers.get('content-type') || '').toLowerCase();
+  if (contentType.includes('mpegurl') || contentType.includes('application/vnd.apple')) {
+    return true;
+  }
+
+  return hasM3u8Path(response.url) || hasM3u8Path(streamUrl);
+}
+
 async function isPlayableStream(stream, signal) {
   const startedAt = Date.now();
   const headers = {
@@ -473,7 +507,7 @@ async function isPlayableStream(stream, signal) {
       return false;
     }
 
-    if (stream.url.toLowerCase().includes('.m3u8')) {
+    if (isHlsManifestProbe(response, stream.url)) {
       if (isHtmlResponse(response)) {
         recordHostHealth(stream, 'soft-fail', {
           status: response.status,

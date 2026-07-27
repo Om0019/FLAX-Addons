@@ -187,11 +187,78 @@ async function testAllFailedFallsBackToCandidates() {
   }
 }
 
+// A playlist is not always announced by its path. Several hosts serve one from an
+// extensionless URL and say so only in the content type; judging by extension
+// alone recorded those as unplayable.
+async function testExtensionlessManifestIsPlayable() {
+  const { server, port } = await startOrigin();
+  const origin = `http://127.0.0.1:${port}`;
+  const bareUrl = `${origin}/good/0`;
+  const badUrl = `${origin}/bad/0/master.m3u8`;
+
+  try {
+    const orchestrator = loadOrchestratorWith({
+      LaMovie: stubScraper('LaMovie', [bareUrl]),
+      Cuevana3i: stubScraper('Cuevana3i', [badUrl])
+    });
+
+    // The dead stream is the discriminator. If the manifest is judged playable it
+    // is confirmed and the 404 is dropped, leaving one. If it is not, nothing
+    // validates, the total-failure fallback returns both, and this fails.
+    const streams = await orchestrator.getStreams('movie', 'tmdb:movie:4', null, null);
+    assert.deepStrictEqual(
+      streams.map((stream) => stream.url),
+      [bareUrl],
+      'a manifest identified only by its content type is confirmed playable'
+    );
+  } finally {
+    server.close();
+  }
+}
+
+// The same routing bug in the other direction: a `.m3u8` in a query string is not
+// a playlist, and must not send an MP4 down the playlist path to be judged on a
+// #EXTM3U it will never contain.
+async function testM3u8InQueryStringIsNotTreatedAsManifest() {
+  const server = http.createServer((req, res) => {
+    if (req.url.startsWith('/bad/')) {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('gone');
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'video/mp4' });
+    res.end('\x00\x00\x00\x18ftypmp42');
+  });
+  await new Promise((resolve) => server.listen(0, resolve));
+
+  try {
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const url = `${origin}/video.mp4?fallback=old.m3u8`;
+    const badUrl = `${origin}/bad/0.mp4`;
+
+    const orchestrator = loadOrchestratorWith({
+      LaMovie: stubScraper('LaMovie', [url]),
+      Cuevana3i: stubScraper('Cuevana3i', [badUrl])
+    });
+
+    const streams = await orchestrator.getStreams('movie', 'tmdb:movie:5', null, null);
+    assert.deepStrictEqual(
+      streams.map((stream) => stream.url),
+      [url],
+      'the mp4 is confirmed as video rather than failed for a missing #EXTM3U'
+    );
+  } finally {
+    server.close();
+  }
+}
+
 async function run() {
   const tests = [
     ['Unproven streams survive the early exit', testUnprovenStreamsSurviveTheEarlyExit],
     ['Failed streams are still dropped', testFailedStreamsAreStillDropped],
-    ['Total validation failure falls back to candidates', testAllFailedFallsBackToCandidates]
+    ['Total validation failure falls back to candidates', testAllFailedFallsBackToCandidates],
+    ['Extensionless manifest is playable', testExtensionlessManifestIsPlayable],
+    ['m3u8 in a query string is not a manifest', testM3u8InQueryStringIsNotTreatedAsManifest]
   ];
 
   for (const [label, test] of tests) {
