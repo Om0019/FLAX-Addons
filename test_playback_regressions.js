@@ -696,6 +696,83 @@ function testBareIpHostsDoNotRankFirst() {
   assert.strictEqual(ordered[ordered.length - 1].name, 'ip', 'it goes last');
 }
 
+/**
+ * Probes started while sources are still reporting overlap work that is happening
+ * anyway, and the phase budget bounds what anyone waits for either way, so those
+ * probes get the deadline the measurements ask for. Over 189 streams at the
+ * concurrency probes actually run at, a 2800ms deadline reached 90% of the
+ * available answers and 4000ms reaches 95% — and the streams in that band are the
+ * same hosts that answer in ~1.4s when nothing else is in flight.
+ */
+async function testEagerProbesOutlastTheOldDeadline() {
+  const { createStreamValidator, startEagerValidation, hostHealth: health } = scrapers.__test;
+
+  const origin = await startServer((req, res) => {
+    // Answers at 3000ms: inside the eager deadline, outside the old one.
+    setTimeout(() => {
+      res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
+      res.end('#EXTM3U\n#EXTINF:4,\nseg.ts\n');
+    }, 3000);
+  });
+
+  try {
+    const port = origin.address().port;
+    health.clear();
+
+    const stream = { name: 'slow', title: 'slow but fine', url: `http://127.0.0.1:${port}/eager.m3u8` };
+    const validator = createStreamValidator(new AbortController().signal);
+    startEagerValidation([stream], validator);
+
+    // Same URL, so this picks up the probe the eager pass already started.
+    const eager = await validator.validate(stream);
+    assert.strictEqual(eager.playable, true, 'a host answering at 3s is confirmed by an eager probe');
+
+    // The same host, given only what the final phase can offer, is not confirmed —
+    // and says so rather than claiming the stream is bad.
+    const late = createStreamValidator(new AbortController().signal);
+    const cut = await late.validate({ ...stream, url: `http://127.0.0.1:${port}/late.m3u8` }, 2400);
+    assert.strictEqual(cut.playable, false, 'the shorter deadline does not reach an answer');
+    assert.strictEqual(cut.conclusive, false, 'and reports that it judged nothing');
+  } finally {
+    health.clear();
+    origin.close();
+  }
+}
+
+/**
+ * The static host score is a prior on which families play, and it had drifted from
+ * what they do. Measured over 189 streams played end to end: vimeos 35/35, goodstream
+ * 30/31, acek-cdn 24/51, dramiyos-cdn 11/25, hlswish 4/11, turboviplay 0/17,
+ * pelisplus-ip 0/17. goodstream was ranked below acek-cdn at half its reliability,
+ * and turboviplay — which plays nothing at all — was ranked second best of every
+ * family.
+ */
+function testHostScoresFollowMeasuredReliability() {
+  const { sortStreams } = scrapers.__test;
+  const at = (host) => ({ name: host, title: '', url: `https://${host}/x/master.m3u8` });
+
+  const order = sortStreams([
+    at('cdn1.turboviplay.com'), at('x.acek-cdn.com'), at('hls2.goodstream.one'),
+    at('45.156.158.200'), at('s8.vimeos.net'), at('y.dramiyos-cdn.com'),
+    at('z.premilkyway.com'), at('unknown.example.com')
+  ]).map((stream) => new URL(stream.url).hostname);
+
+  const rank = (host) => order.indexOf(host);
+
+  assert.strictEqual(order[0], 's8.vimeos.net', 'the family that played every time leads');
+  assert(rank('hls2.goodstream.one') < rank('x.acek-cdn.com'), '97% outranks 47%');
+  assert(rank('x.acek-cdn.com') < rank('y.dramiyos-cdn.com'), '47% outranks 44%');
+  assert(rank('y.dramiyos-cdn.com') < rank('z.premilkyway.com'), '44% outranks 36%');
+
+  // The two families that played nothing go below even an unrecognised host.
+  for (const dead of ['cdn1.turboviplay.com', '45.156.158.200']) {
+    assert(
+      rank(dead) > rank('unknown.example.com'),
+      `${dead} played nothing and must rank below an unknown host`
+    );
+  }
+}
+
 (async () => {
   testForwardedProtoListIsNotPastedIntoTheBaseUrl();
   console.log('ok - X-Forwarded-Proto lists do not corrupt rewritten manifest URLs');
@@ -741,6 +818,12 @@ function testBareIpHostsDoNotRankFirst() {
 
   testBareIpHostsDoNotRankFirst();
   console.log('ok - bare-IP hosts no longer lead the stream list');
+
+  await testEagerProbesOutlastTheOldDeadline();
+  console.log('ok - eager probes get the deadline the measurements ask for');
+
+  testHostScoresFollowMeasuredReliability();
+  console.log('ok - host scores follow measured reliability');
 
   console.log('\nPlayback regression tests passed');
 })().catch((error) => {

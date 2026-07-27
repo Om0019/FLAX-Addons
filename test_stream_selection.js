@@ -21,7 +21,12 @@ const constant = (name) => {
   return parseInt(match[1], 10);
 };
 const MIN_CONFIRMED_STREAMS = constant('MIN_CONFIRMED_STREAMS');
-const STREAM_VALIDATION_TIMEOUT_MS = constant('STREAM_VALIDATION_TIMEOUT_MS');
+// The longest a probe can wait, whichever phase started it: a "slow" path below has
+// to outlast even that to count as one the probe never hears back from.
+const LONGEST_PROBE_MS = Math.max(
+  constant('STREAM_VALIDATION_EAGER_TIMEOUT_MS'),
+  constant('STREAM_VALIDATION_TOTAL_TIMEOUT_MS')
+);
 
 /**
  * An origin serving three kinds of path:
@@ -43,7 +48,7 @@ function startOrigin() {
     };
 
     if (req.url.startsWith('/slow/')) {
-      setTimeout(send, STREAM_VALIDATION_TIMEOUT_MS * 3).unref();
+      setTimeout(send, LONGEST_PROBE_MS * 3).unref();
       return;
     }
 

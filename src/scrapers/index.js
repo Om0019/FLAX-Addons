@@ -36,13 +36,23 @@ const FAST_SOURCE_MIN_SOURCES = 2;
 // first completion onwards.
 const FAST_SOURCE_MIN_WAIT_MS = 3500;
 const FAST_SOURCE_RELAXED_MIN_SOURCES = 1;
-// A single probe must be able to finish inside the phase budget below, or a slow
-// host guarantees the phase times out instead of ever completing. It used to be
-// 5000ms against a 4000ms budget, which is why validation so often burned its
-// whole allowance and still returned fewer streams than it wanted. Measured across
-// three settings, tightening these changed no stream counts, so the headroom was
-// pure latency.
-const STREAM_VALIDATION_TIMEOUT_MS = 2800;
+// How long one probe may wait for an answer, which is not one number because the
+// two places probes start from are not alike.
+//
+// Measured over 189 streams at the concurrency probes actually run at: half of all
+// answers arrive by 1101ms and three quarters by 1629ms, but the tail is long and
+// flat. A 2800ms deadline reached 90% of the answers available; 4000ms reaches 95%,
+// 4500ms reaches 96%, and then nothing more arrives until 8000ms. The streams in
+// that 2800-4000ms band are not slow-and-broken, they are slow-and-fine — the same
+// hosts answer in ~1.4s when nothing else is in flight.
+//
+// A probe started while sources are still reporting overlaps work that is happening
+// anyway, so it can have the deadline the measurements ask for: the phase budget
+// below still bounds what anyone waits for, so a longer per-probe deadline buys
+// answers without costing latency. A probe started in the final phase cannot — the
+// phase ends the wait either way, so it is given exactly the budget that remains
+// and nothing is served by pretending otherwise.
+const STREAM_VALIDATION_EAGER_TIMEOUT_MS = 4000;
 const STREAM_VALIDATION_TOTAL_TIMEOUT_MS = 3200;
 const STREAM_VALIDATION_FAST_TIMEOUT_MS = 2400;
 // Follow-up probe for one variant of a master playlist. Short on purpose: it only
@@ -234,21 +244,32 @@ function scoreStream(stream) {
   const healthPenalty = getHostPenalty(getHostHealth(host));
   let baseScore = 9;
 
-  // Bare-IPv4 hosts are pelisplus, and it serves HTTPS on addresses its certificates
-  // do not cover: every stream sampled in July 2026 failed
-  // ERR_TLS_CERT_ALTNAME_INVALID, across four addresses on two netblocks. These
-  // streams reach a viewer through this addon's proxy, so a certificate Node will
-  // not accept is one the viewer cannot play either, and ranking them best of all
-  // put a stream that cannot play at the top of the list. Ranked last rather than
-  // dropped: the day pelisplus fixes its certificates they work again, and nothing
-  // else about them is wrong.
+  // Ordering measured, not guessed. 189 streams collected straight from the sources
+  // and each one played end to end — master, variant, first segment — in July 2026:
+  //
+  //   vimeos        35/35  100%      acek-cdn      24/51   47%
+  //   goodstream    30/31   97%      dramiyos-cdn  11/25   44%
+  //   hlswish        4/11   36%      turboviplay    0/17    0%
+  //   pelisplus-ip   0/17    0%
+  //
+  // Only the families that sample disagreed with have moved. acek-cdn, dramiyos-cdn
+  // and hlswish already sat in the right order relative to each other, and the
+  // families no stream in the sample belonged to — cfglobalcdn, mediafire, fireload,
+  // nupload, cdn-tnmr — keep the positions they had, because nothing here says
+  // anything about them.
+  //
+  // Bare-IPv4 hosts are pelisplus, which serves HTTPS on addresses its certificates
+  // do not cover; every one failed ERR_TLS_CERT_ALTNAME_INVALID. turboviplay serves
+  // a master that loads and names variants on hosts that no longer resolve, which is
+  // why nothing behind it plays. Both are ranked below an unrecognised host rather
+  // than dropped: the day either is fixed, nothing else about those streams is wrong.
   if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) baseScore = 10;
-  else if (host.includes('turboviplay.com')) baseScore = 1;
-  else if (host.includes('vimeos')) baseScore = 2;
+  else if (host.includes('turboviplay.com')) baseScore = 10;
+  else if (host.includes('vimeos')) baseScore = 0;
+  else if (host.includes('goodstream')) baseScore = 1;
   else if (host.includes('acek-cdn.com')) baseScore = 3;
   else if (host.includes('dramiyos-cdn.com') || host.includes('cfglobalcdn.com')) baseScore = 4;
   else if (host.includes('mediafire.com') || host.includes('fireload.com')) baseScore = 5;
-  else if (host.includes('goodstream')) baseScore = 6;
   else if (host.includes('nupload')) baseScore = 6;
   else if (host.includes('premilkyway.com') || title.includes('hlswish')) baseScore = 7;
   else if (host.includes('cdn-tnmr.org')) baseScore = 8;
@@ -723,7 +744,7 @@ function isDefiniteFetchFailure(error) {
     || code === 'HOSTNAME_MISMATCH';
 }
 
-async function isPlayableStream(stream, signal) {
+async function isPlayableStream(stream, signal, timeoutMs) {
   const startedAt = Date.now();
   const headers = {
     'User-Agent': stream?.behaviorHints?.proxyHeaders?.request?.['User-Agent']
@@ -741,7 +762,7 @@ async function isPlayableStream(stream, signal) {
       headers,
       redirect: 'follow',
       signal
-    }, STREAM_VALIDATION_TIMEOUT_MS);
+    }, timeoutMs);
 
     if ([401, 403, 404, 410, 451].includes(response.status)) {
       console.log(`Scraper orchestrator: Filtering unplayable stream (${response.status}): ${stream.url}`);
@@ -874,11 +895,16 @@ function createStreamValidator(signal, onConfirmed) {
   let confirmed = 0;
 
   return {
-    validate(stream) {
+    /**
+     * `timeoutMs` belongs to whoever starts the probe. A probe is shared by URL, so
+     * the first caller's deadline is the one that applies — which is what we want:
+     * the eager pass starts first and starts with the longer one.
+     */
+    validate(stream, timeoutMs) {
       const existing = byUrl.get(stream.url);
       if (existing) return existing;
 
-      const probe = isPlayableStream(stream, signal).catch((error) => {
+      const probe = isPlayableStream(stream, signal, timeoutMs).catch((error) => {
         console.log(`Scraper orchestrator: Validation task failed for ${stream.url}: ${error.message}`);
         if (!error.message.startsWith('Fetch aborted:')) {
           recordHostHealth(stream, 'soft-fail');
@@ -921,7 +947,7 @@ function startEagerValidation(streams, validator) {
 
   for (const stream of candidates) {
     if (validator.started >= MAX_EAGER_VALIDATIONS) break;
-    validator.validate(stream);
+    validator.validate(stream, STREAM_VALIDATION_EAGER_TIMEOUT_MS);
   }
 }
 
@@ -958,10 +984,16 @@ async function validatePlayableStreams(streams, validator, validationController)
     resolveAllComplete = resolve;
   });
 
+  const timeoutMs = remainingStreams.length > 0
+    ? STREAM_VALIDATION_FAST_TIMEOUT_MS
+    : STREAM_VALIDATION_TOTAL_TIMEOUT_MS;
+
   streamsToValidate.forEach((stream) => {
     // Already-settled probes resolve immediately; this is where work done during
-    // collection gets picked up rather than repeated.
-    validator.validate(stream)
+    // collection gets picked up rather than repeated. A probe that starts here gets
+    // the phase's own budget: the phase ends the wait regardless, so a shorter
+    // deadline would only produce an earlier — and equally inconclusive — non-answer.
+    validator.validate(stream, timeoutMs)
       .then(({ playable, quality, conclusive }) => {
         if (playable) {
           // The probe read the manifest, so this is the one point where a claim can
@@ -986,9 +1018,6 @@ async function validatePlayableStreams(streams, validator, validationController)
       });
   });
 
-  const timeoutMs = remainingStreams.length > 0
-    ? STREAM_VALIDATION_FAST_TIMEOUT_MS
-    : STREAM_VALIDATION_TOTAL_TIMEOUT_MS;
   const completionReason = await Promise.race([
     enoughConfirmedPromise,
     allCompletePromise,
