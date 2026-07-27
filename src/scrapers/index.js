@@ -60,6 +60,13 @@ const MAX_VALIDATION_CANDIDATES = 8;
 // other, so the earliest source's streams sat unchecked until the slowest source
 // finished. Capped so an early source cannot spend the whole budget.
 const MAX_EAGER_VALIDATIONS = 8;
+// Alternative titles only widen the pool of names the scrapers search for, so they
+// are worth a short wait and nothing more. On the IMDb path the lookup cannot even
+// start until the id mapping comes back, which put two full TMDB deadlines — up to
+// 10s — ahead of the first scraper request on a cold lookup. Giving up early costs
+// the extra titles for this request only: the call is left running and its answer
+// lands in the TMDB cache for the next one.
+const ALTERNATIVE_TITLES_MAX_WAIT_MS = 1500;
 const STREAM_CACHE_TTL_MS = 10 * 60 * 1000;
 const EMPTY_STREAM_CACHE_TTL_MS = 15 * 1000;
 const ENABLE_CINEHDPLUS = false;
@@ -76,12 +83,24 @@ const streamCache = createTtlCache({ maxEntries: STREAM_CACHE_MAX_ENTRIES });
 const hostHealth = createTtlCache({ maxEntries: HOST_HEALTH_MAX_HOSTS });
 const inFlightRequests = new Map();
 
+// A stream's hostname is a pure function of a URL that never changes, and it is
+// asked for repeatedly — by the scorer, the family grouper and the health check,
+// each of them inside a sort comparator. Parsed once per stream object instead.
+const hostByStream = new WeakMap();
+
 function getStreamHost(stream) {
+  const cached = hostByStream.get(stream);
+  if (cached !== undefined) return cached;
+
+  let host;
   try {
-    return new URL(stream.url).hostname.toLowerCase();
+    host = new URL(stream.url).hostname.toLowerCase();
   } catch {
-    return '';
+    host = '';
   }
+
+  hostByStream.set(stream, host);
+  return host;
 }
 
 function isKnownBadStream(stream) {
@@ -174,11 +193,20 @@ function getHostPenalty(health) {
   const events = health.events || [];
   if (events.length === 0) return 0;
 
-  const softFailures = events.filter((event) => event.outcome === 'soft-fail').length;
-  const successes = events.filter((event) => event.outcome === 'success').length;
-  const timeouts = events.filter((event) => event.outcome === 'timeout').length;
-  const hardFailures = events.filter((event) => event.outcome === 'hard-fail' || isHardDeadStatus(event.status)).length;
-  const gatewayFailures = events.filter((event) => event.outcome === 'gateway-fail' || isGatewayFailureStatus(event.status)).length;
+  let softFailures = 0;
+  let successes = 0;
+  let timeouts = 0;
+  let hardFailures = 0;
+  let gatewayFailures = 0;
+
+  for (const event of events) {
+    if (event.outcome === 'soft-fail') softFailures += 1;
+    if (event.outcome === 'success') successes += 1;
+    if (event.outcome === 'timeout') timeouts += 1;
+    if (event.outcome === 'hard-fail' || isHardDeadStatus(event.status)) hardFailures += 1;
+    if (event.outcome === 'gateway-fail' || isGatewayFailureStatus(event.status)) gatewayFailures += 1;
+  }
+
   const latencyPenalty = health.avgLatencyMs
     ? Math.min(3, Math.floor(Math.max(0, health.avgLatencyMs - 1500) / 1000))
     : 0;
@@ -238,32 +266,46 @@ function getHostFamily(stream) {
  * tied. Ranking on quality first would put a host known to fail behind a claim
  * written in a URL, and the claim is the weaker fact of the two.
  */
-function compareStreams(a, b) {
-  return (scoreStream(a) - scoreStream(b))
-    || (qualityRank(b.quality) - qualityRank(a.quality));
+function compareRanked(a, b) {
+  return (a.score - b.score) || (b.quality - a.quality);
+}
+
+/**
+ * Scores are computed once per stream per sort rather than on every comparison:
+ * scoring reaches into host health, which walks that host's event list, and a
+ * comparator runs O(n log n) times. Deliberately not memoised across calls — probes
+ * update host health while a request is in flight, and a later sort is supposed to
+ * see the newer verdict.
+ */
+function rankStream(stream) {
+  return {
+    stream,
+    score: scoreStream(stream),
+    family: getHostFamily(stream),
+    quality: qualityRank(stream.quality)
+  };
 }
 
 function sortStreams(streams) {
-  const ranked = [...streams].sort(compareStreams);
+  const ranked = streams.map(rankStream).sort(compareRanked);
   const byFamily = new Map();
 
-  for (const stream of ranked) {
-    const family = getHostFamily(stream);
-    if (!byFamily.has(family)) byFamily.set(family, []);
-    byFamily.get(family).push(stream);
+  for (const entry of ranked) {
+    if (!byFamily.has(entry.family)) byFamily.set(entry.family, []);
+    byFamily.get(entry.family).push(entry);
   }
 
   // Families are ordered by their own best stream, on the same comparison, so a
   // family that leads with 1080p goes ahead of an equally scored one leading with
   // 480p instead of on whichever happened to be ranked first.
   const sortedFamilies = [...byFamily.entries()]
-    .sort((a, b) => compareStreams(a[1][0], b[1][0]));
+    .sort((a, b) => compareRanked(a[1][0], b[1][0]));
 
   const diversified = [];
-  while (sortedFamilies.some(([, familyStreams]) => familyStreams.length > 0)) {
-    for (const [, familyStreams] of sortedFamilies) {
-      const stream = familyStreams.shift();
-      if (stream) diversified.push(stream);
+  while (sortedFamilies.some(([, familyEntries]) => familyEntries.length > 0)) {
+    for (const [, familyEntries] of sortedFamilies) {
+      const entry = familyEntries.shift();
+      if (entry) diversified.push(entry.stream);
     }
   }
 
@@ -384,6 +426,20 @@ async function collectScraperResults(tasks, timeoutMs, onResult) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Resolves `promise`, or `fallbackValue` if it takes longer than `timeoutMs`. The
+ * promise itself is left to finish — this bounds how long a caller waits, not the
+ * work — so it must be one that settles on its own and never rejects.
+ */
+function resolveWithin(promise, timeoutMs, fallbackValue) {
+  let timeoutId;
+  const fallback = new Promise((resolve) => {
+    timeoutId = setTimeout(() => resolve(fallbackValue), timeoutMs);
+  });
+
+  return Promise.race([promise, fallback]).finally(() => clearTimeout(timeoutId));
 }
 
 function createScraperTask(scraper, label, args, timeoutMs, extraTitles = []) {
@@ -933,8 +989,17 @@ async function getStreamsUncached(type, id, season, episode) {
     // 1b. Widen the title pool with any other Spanish regional dub names
     // TMDB knows about (sites don't all agree on which one they use).
     const knownTitles = new Set([cleanComparableTitle(title), cleanComparableTitle(originalTitle)]);
-    const alternativeTitles = await (alternativeTitlesPromise || tmdb.getAlternativeTitles(type, tmdbId));
-    const extraTitles = alternativeTitles.filter((candidate) => {
+    const alternativeTitles = await resolveWithin(
+      alternativeTitlesPromise || tmdb.getAlternativeTitles(type, tmdbId),
+      ALTERNATIVE_TITLES_MAX_WAIT_MS,
+      null
+    );
+
+    if (alternativeTitles === null) {
+      console.warn(`Orchestrator: Alternative titles did not arrive within ${ALTERNATIVE_TITLES_MAX_WAIT_MS}ms; starting scrapers without them.`);
+    }
+
+    const extraTitles = (alternativeTitles || []).filter((candidate) => {
       const clean = cleanComparableTitle(candidate);
       if (!clean || knownTitles.has(clean)) return false;
       knownTitles.add(clean);

@@ -1,7 +1,7 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
 const { fetchTextWithTimeout, fetchWithTimeout } = require('../http');
-const { cleanText, extractCandidateYears } = require('./common');
+const { cleanText, extractCandidateYears, raceTitleSearches } = require('./common');
 const TOKEN_CONCURRENCY = 4;
 const SEARCH_TIMEOUT_MS = 4500;
 const PAGE_TIMEOUT_MS = 5500;
@@ -199,6 +199,14 @@ async function mapWithConcurrencyUntilEnough(items, concurrency, worker, options
     }
 
     Array.from({ length: Math.min(concurrency, items.length) }, () => runNext());
+
+    // Nothing to run means nothing will ever call maybeFinish, so an empty list
+    // used to sit here until the minimum-wait timer fired and only then notice it
+    // had been finished from the start — a flat 2500ms of dead time on every page
+    // that yields no server tokens, spent inside this source's 10s budget while
+    // the orchestrator waited on it. Settling it here is the same check the
+    // workers make, run once for the case where there are no workers.
+    maybeFinish();
   });
 }
 
@@ -290,12 +298,10 @@ async function scrape(title, originalTitle, year, type, season, episode, options
   }
 
   try {
-    let bestMatch = await performSearch(title);
-
-    if (!bestMatch && originalTitle && cleanText(originalTitle) !== cleanText(title)) {
-      console.log(`TioPlus: No match for "${title}", trying originalTitle "${originalTitle}"`);
-      bestMatch = await performSearch(originalTitle);
-    }
+    const racedTitles = originalTitle && cleanText(originalTitle) !== cleanText(title)
+      ? [title, originalTitle]
+      : [title];
+    let bestMatch = await raceTitleSearches(racedTitles, performSearch);
 
     const triedClean = new Set([cleanText(title), cleanText(originalTitle)]);
     for (const extraTitle of extraTitles) {

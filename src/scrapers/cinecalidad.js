@@ -1,7 +1,7 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
 const { fetchTextWithTimeout, fetchWithTimeout } = require('../http');
-const { cleanText } = require('./common');
+const { cleanText, raceTitleSearches } = require('./common');
 
 const SEARCH_TIMEOUT_MS = 4500;
 const PAGE_TIMEOUT_MS = 5500;
@@ -257,12 +257,10 @@ async function scrape(title, originalTitle, year, type, season, episode, options
   }
 
   try {
-    let bestMatch = await performSearch(title);
-
-    if (!bestMatch && originalTitle && cleanText(originalTitle) !== cleanText(title)) {
-      console.log(`Cinecalidad: No match for "${title}", trying originalTitle "${originalTitle}"`);
-      bestMatch = await performSearch(originalTitle);
-    }
+    const racedTitles = originalTitle && cleanText(originalTitle) !== cleanText(title)
+      ? [title, originalTitle]
+      : [title];
+    let bestMatch = await raceTitleSearches(racedTitles, performSearch);
 
     const triedClean = new Set([cleanText(title), cleanText(originalTitle)]);
     for (const extraTitle of extraTitles) {

@@ -1,6 +1,6 @@
 const unpacker = require('../unpacker');
 const { fetchJsonWithTimeout } = require('../http');
-const { cleanText, extractYear, mapWithConcurrency } = require('./common');
+const { cleanText, extractYear, mapWithConcurrency, raceTitleSearches } = require('./common');
 
 const BASE_URL = 'https://lamovie.org';
 const API_URL = `${BASE_URL}/wp-api/v1`;
@@ -45,7 +45,9 @@ function scoreCandidate(result, title, originalTitle, year, type, extraTitles = 
 async function search(title, originalTitle, year, type, userAgent, signal, extraTitles = []) {
   const queries = [...new Set([title, originalTitle, ...extraTitles].filter(Boolean))];
 
-  for (const query of queries) {
+  // Swallows its own failures, as the sequential loop below always has: a search
+  // that errors is one name not found, not a reason to abandon the others.
+  async function runQuery(query) {
     const url = new URL(`${API_URL}/search`);
     url.searchParams.set('postType', 'any');
     url.searchParams.set('q', query);
@@ -56,7 +58,7 @@ async function search(title, originalTitle, year, type, userAgent, signal, extra
         headers: { 'User-Agent': userAgent, 'Accept': 'application/json' },
         signal
       }, SEARCH_TIMEOUT_MS);
-      if (!res.ok) continue;
+      if (!res.ok) return null;
       const posts = Array.isArray(data?.data?.posts) ? data.data.posts : [];
       let bestMatch = null;
       let bestScore = 0;
@@ -69,10 +71,22 @@ async function search(title, originalTitle, year, type, userAgent, signal, extra
         }
       }
 
-      if (bestMatch) return bestMatch;
+      return bestMatch;
     } catch (error) {
       console.warn(`LaMovie: Search failed for "${query}": ${error.message}`);
+      return null;
     }
+  }
+
+  // The Spanish and original names are the two always worth trying, so they go out
+  // together rather than one after the other; see raceTitleSearches. The
+  // alternative-title tail stays sequential.
+  const racedMatch = await raceTitleSearches(queries.slice(0, 2), runQuery);
+  if (racedMatch) return racedMatch;
+
+  for (const query of queries.slice(2)) {
+    const match = await runQuery(query);
+    if (match) return match;
   }
 
   return null;

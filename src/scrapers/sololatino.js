@@ -1,7 +1,7 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
 const { fetchJsonWithTimeout, fetchTextWithTimeout, fetchWithTimeout } = require('../http');
-const { cleanText, extractCandidateYears, mapWithConcurrency } = require('./common');
+const { cleanText, extractCandidateYears, mapWithConcurrency, raceTitleSearches } = require('./common');
 const TOKEN_CONCURRENCY = 3;
 const SEARCH_TIMEOUT_MS = 4500;
 const PAGE_TIMEOUT_MS = 5500;
@@ -289,12 +289,10 @@ async function scrape(title, originalTitle, year, type, season, episode, options
   }
 
   try {
-    let bestMatch = await performSearch(title);
-
-    if (!bestMatch && originalTitle && cleanText(originalTitle) !== cleanText(title)) {
-      console.log(`SoloLatino: No match for "${title}", trying originalTitle "${originalTitle}"`);
-      bestMatch = await performSearch(originalTitle);
-    }
+    const racedTitles = originalTitle && cleanText(originalTitle) !== cleanText(title)
+      ? [title, originalTitle]
+      : [title];
+    let bestMatch = await raceTitleSearches(racedTitles, performSearch);
 
     const triedClean = new Set([cleanText(title), cleanText(originalTitle)]);
     for (const extraTitle of extraTitles) {
@@ -337,14 +335,33 @@ async function scrape(title, originalTitle, year, type, season, episode, options
 
     console.log(`SoloLatino: Matched content URL: ${targetPageUrl}`);
 
-    // 2. Fetch Laravel Sanctum CSRF cookie to establish session cookies
-    const csrfRes = await fetchWithTimeout('https://sololatino.net/sanctum/csrf-cookie', {
+    // 2. Establish session cookies and load the content page. The page request
+    // carries no cookies, so it does not depend on the handshake and there is no
+    // reason to queue behind it — running them one after the other spent a whole
+    // round trip inside the longest scraper budget of the six, which is the one
+    // that most often decides whether the orchestrator's fast return fires.
+    // Settled rather than Promise.all: a rejection here must not leave the other
+    // request's rejection unhandled, and the handshake failure is still the one
+    // reported first.
+    const csrfRequest = fetchWithTimeout('https://sololatino.net/sanctum/csrf-cookie', {
       headers: {
         'User-Agent': userAgent,
         'Accept': 'application/json'
       },
       signal
     }, API_TIMEOUT_MS);
+    const pageRequest = fetchTextWithTimeout(targetPageUrl, {
+      headers: {
+        'User-Agent': userAgent
+      },
+      signal
+    }, PAGE_TIMEOUT_MS);
+
+    const [csrfOutcome, pageOutcome] = await Promise.allSettled([csrfRequest, pageRequest]);
+    if (csrfOutcome.status === 'rejected') throw csrfOutcome.reason;
+    if (pageOutcome.status === 'rejected') throw pageOutcome.reason;
+
+    const csrfRes = csrfOutcome.value;
     if (!csrfRes.ok) {
       console.warn(`SoloLatino: Sanctum handshake failed with status ${csrfRes.status}`);
       return [];
@@ -369,13 +386,9 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     const decodedXSRF = decodeURIComponent(xsrfCookieVal);
     const cookieString = `XSRF-TOKEN=${xsrfCookieVal}; sololatinonet-session=${sessionCookieVal}`;
 
-    // 3. Fetch the actual content page (movie or episode details page) to get the CSRF token and player tokens
-    const { res: pageRes, text: pageHtml } = await fetchTextWithTimeout(targetPageUrl, {
-      headers: {
-        'User-Agent': userAgent
-      },
-      signal
-    }, PAGE_TIMEOUT_MS);
+    // 3. Read the content page (movie or episode details) fetched above for the
+    // CSRF token and the player tokens.
+    const { res: pageRes, text: pageHtml } = pageOutcome.value;
     if (!pageRes.ok) {
       console.warn(`SoloLatino: Failed to fetch target page: ${targetPageUrl} (${pageRes.status})`);
       return [];

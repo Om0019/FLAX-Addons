@@ -9,6 +9,11 @@ const PELISPLUS_FETCH_TIMEOUT_MS = 4500;
 const MAX_RESOLVE_DEPTH = 5;
 const DOOD_DIRECT_TIMEOUT_MS = 1800;
 const FILEMOON_API_TIMEOUT_MS = 3500;
+// How many candidate mirrors may be resolved at once when a page offers several.
+// Deliberately small: every candidate is a different third-party host, so this
+// trades a bounded increase in requests for cutting the length of a chain of
+// failures, not a burst against everything a page lists.
+const EMBED_RESOLVE_CONCURRENCY = 3;
 // embed69 states its own proof-of-work difficulty, and the search costs 16^difficulty
 // hashes. Node is single-threaded, so an unbounded search stalls every other in-flight
 // request: difficulty 6 measures ~58s of blocked event loop, difficulty 7 ~15 minutes.
@@ -387,22 +392,77 @@ function extractXupalaceServers(html, baseUrl) {
   return results;
 }
 
+/**
+ * Runs `worker` over `items` with at most `concurrency` in flight and returns the
+ * result of the earliest item that produced one — the ranking each caller sorted
+ * its candidates into is the whole point, so arrival order must not override it.
+ *
+ * These chains used to run strictly one at a time: a page listing six mirrors paid
+ * five full resolutions, each with its own page fetch and unpack, before reaching a
+ * working one. Overlap is capped rather than unbounded because each candidate is a
+ * *different* third-party host, and firing every mirror at once would turn one
+ * lookup into a burst against all of them.
+ *
+ * `worker` is expected to handle its own failures, matching the sequential loops
+ * this replaced, where one mirror throwing did not abandon the rest.
+ */
+function firstResultInOrder(items, concurrency, worker) {
+  const pending = items.map(() => {
+    let settle;
+    const promise = new Promise((resolve) => { settle = resolve; });
+    return { promise, settle };
+  });
+
+  let cursor = 0;
+  let stopped = false;
+
+  async function runNext() {
+    while (!stopped) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      let outcome = null;
+      try {
+        outcome = await worker(items[index], index);
+      } catch {
+        outcome = null;
+      }
+      pending[index].settle(outcome);
+    }
+  }
+
+  // At least one runner whenever there is anything to run: with none, no entry
+  // would ever settle and the await below would never return.
+  const runners = items.length === 0 ? 0 : Math.max(1, Math.min(concurrency, items.length));
+  Array.from({ length: runners }, () => runNext());
+
+  return (async () => {
+    for (const entry of pending) {
+      const outcome = await entry.promise;
+      if (outcome) {
+        // Later candidates are no longer wanted; runners stop after the attempt
+        // they are already inside.
+        stopped = true;
+        return outcome;
+      }
+    }
+    return null;
+  })();
+}
+
 async function resolveXupalaceServers(html, baseUrl, userAgent, options) {
   const { depth, visited, signal } = options;
   const servers = extractXupalaceServers(html, baseUrl)
     .filter((entry) => !isFileLockerServer(entry.server))
     .sort((a, b) => scoreXupalaceServer(a.server) - scoreXupalaceServer(b.server));
 
-  for (const entry of servers) {
+  return firstResultInOrder(servers, EMBED_RESOLVE_CONCURRENCY, async (entry) => {
     try {
-      const directUrl = await resolvePlayerStream(entry.url, userAgent, baseUrl, { depth: depth + 1, visited, signal });
-      if (directUrl) return directUrl;
+      return await resolvePlayerStream(entry.url, userAgent, baseUrl, { depth: depth + 1, visited, signal });
     } catch (e) {
       console.warn(`Unpacker: Xupalace server ${entry.server || entry.url} failed: ${e.message}`);
+      return null;
     }
-  }
-
-  return null;
+  });
 }
 
 function normalizeNetuEmbedUrl(url, referer) {
@@ -1211,15 +1271,18 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
                     return kindScore(a) - kindScore(b) || serverScore(a) - serverScore(b);
                 });
 
-                let attempts = 0;
-                for (const embed of rankedEmbeds) {
-                    if (attempts >= MAX_EMBED69_ATTEMPTS) break;
-                    if (!isSupportedEmbedServer(embed.server)) continue;
+                // The attempt cap is applied by selecting the candidates up front
+                // rather than by counting as we go: with overlapping resolutions
+                // there is no single running total to compare against, and the cap
+                // has always meant "try at most this many", which this preserves.
+                const attemptedEmbeds = rankedEmbeds
+                    .filter((embed) => isSupportedEmbedServer(embed.server))
+                    .slice(0, MAX_EMBED69_ATTEMPTS);
 
-                    attempts += 1;
-                    const directUrl = await resolvePlayerStream(embed.url, userAgent, url, { depth: depth + 1, visited, signal });
-                    if (directUrl) return directUrl;
-                }
+                const directUrl = await firstResultInOrder(attemptedEmbeds, EMBED_RESOLVE_CONCURRENCY, async (embed) => (
+                    resolvePlayerStream(embed.url, userAgent, url, { depth: depth + 1, visited, signal })
+                ));
+                if (directUrl) return directUrl;
             }
         }
         
@@ -1311,6 +1374,7 @@ module.exports = {
     extractStreamtapeStream,
     extractVidguardStream,
     extractVoeDirectStream,
+    firstResultInOrder,
     isPelisplusHost,
     isStreamtapeHost,
     isSupportedEmbedServer,
