@@ -369,10 +369,10 @@ function testQualityOnlyBreaksTies() {
   const sorted = sortStreams([low, high]);
   assert.strictEqual(sorted[0].url, high.url, 'the better rendition leads within one host');
 
-  // cdn-tnmr scores worst of the named hosts; a 1080p claim must not lift it above
-  // a well-scored host offering 480p.
-  const wellScored = { url: 'https://acek-cdn.com/480/a.m3u8', quality: qualityFromUrl('https://acek-cdn.com/480/a.m3u8') };
-  const poorlyScored = { url: 'https://cdn-tnmr.org/1080/b.m3u8', quality: qualityFromUrl('https://cdn-tnmr.org/1080/b.m3u8') };
+  // dramiyos-cdn scores worst of the named hosts (see scoreStream); a 1080p claim
+  // must not lift it above a well-scored host offering 480p.
+  const wellScored = { url: 'https://goodstream.uno/480/a.m3u8', quality: qualityFromUrl('https://goodstream.uno/480/a.m3u8') };
+  const poorlyScored = { url: 'https://dramiyos-cdn.com/1080/b.m3u8', quality: qualityFromUrl('https://dramiyos-cdn.com/1080/b.m3u8') };
   assert.strictEqual(
     sortStreams([poorlyScored, wellScored])[0].url,
     wellScored.url,
