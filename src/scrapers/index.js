@@ -582,6 +582,10 @@ async function validatePlayableStreams(streams, validator, validationController)
   }
 
   const playableStreams = [];
+  // Probes that came back with a real verdict of "not playable". Kept apart from
+  // the ones still in flight, because an aborted probe also resolves false and
+  // that is not evidence of anything.
+  const rejectedUrls = new Set();
   let completed = 0;
   let resolveEnoughConfirmed;
   let resolveAllComplete;
@@ -603,7 +607,9 @@ async function validatePlayableStreams(streams, validator, validationController)
           if (playableStreams.length >= MIN_CONFIRMED_STREAMS) {
             resolveEnoughConfirmed('enough-confirmed');
           }
+          return;
         }
+        rejectedUrls.add(stream.url);
       })
       .finally(() => {
         completed += 1;
@@ -622,22 +628,38 @@ async function validatePlayableStreams(streams, validator, validationController)
     new Promise((resolve) => setTimeout(() => resolve('timeout'), timeoutMs))
   ]);
 
+  // Snapshot before aborting. Every probe that reached a verdict has already run
+  // its handler; the ones abort() is about to cancel resolve later and must not be
+  // mistaken for failures.
+  const decidedBad = new Set(rejectedUrls);
+
   if (completionReason !== 'complete') {
     validationController.abort();
   }
 
-  if (playableStreams.length > 0) {
-    if (completionReason === 'timeout') {
-      console.warn(`Scraper orchestrator: Validation timed out; returning ${playableStreams.length} confirmed playable streams and dropping slow candidates.`);
-    }
-    return sortStreams(playableStreams);
+  // MIN_CONFIRMED_STREAMS ends validation early, which is what keeps the response
+  // fast — but it used to end the *result* too, so a lookup that found five working
+  // links returned three and threw the rest away. Only a stream that actually failed
+  // its probe is dropped now; the ones still in flight, and the ones past the
+  // candidate cap, follow the confirmed streams instead of vanishing.
+  const confirmed = sortStreams(playableStreams);
+  const confirmedUrls = new Set(confirmed.map((stream) => stream.url));
+  const unproven = [...eligibleStreams, ...skippedStreams].filter((stream) => (
+    !confirmedUrls.has(stream.url) && !decidedBad.has(stream.url)
+  ));
+
+  if (completionReason === 'timeout' && confirmed.length > 0) {
+    console.warn(`Scraper orchestrator: Validation timed out; ${confirmed.length} confirmed playable, ${unproven.length} unverified candidates kept.`);
   }
 
-  if (remainingStreams.length > 0) {
-    console.warn('Scraper orchestrator: No validated streams yet; returning URL-sanitized streams to avoid a false empty result.');
-    return sortedStreams;
+  const selected = [...confirmed, ...unproven];
+  if (selected.length > 0) {
+    return selected;
   }
 
+  // Everything that was probed failed. Validation has false negatives — hosts that
+  // refuse the Range probe but play fine — so an empty list here is more likely to
+  // be wrong than the candidates are.
   if (sortedStreams.length > 0) {
     console.warn('Scraper orchestrator: Validation found no confirmed playable streams; returning URL-sanitized streams to avoid a false empty result.');
   }
