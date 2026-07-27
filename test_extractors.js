@@ -3,11 +3,13 @@
 // in CI rather than silently returning zero streams from a live source.
 
 const assert = require('assert');
+const crypto = require('crypto');
 const http = require('http');
 const { extractDirectStream, resolvePlayerStream, resolveDownloadUrl, __test } = require('./src/unpacker');
 
 const {
   decodeVidguardSignature,
+  decryptFilemoonPayload,
   extractMediafireDirectUrl,
   extractVidguardStream,
   extractVoeDirectStream,
@@ -344,6 +346,58 @@ async function testDeadJsRedirectFallsThrough() {
   }
 }
 
+function base64Url(buffer) {
+  return buffer.toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+}
+
+/**
+ * Builds a Filemoon playback payload the way its API does: AES-GCM over the JSON,
+ * with the key split across `key_parts` and `version` naming which two entries to
+ * reassemble it from.
+ */
+function buildFilemoonPayload(data, { version, partCount = 30 } = {}) {
+  const parts = Array.from({ length: partCount }, () => crypto.randomBytes(16));
+  const index = Number(version);
+  const key = Buffer.concat([parts[index - 1], parts[30 - index]]);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(JSON.stringify(data), 'utf8'), cipher.final()]);
+
+  return {
+    version: String(version),
+    key_parts: parts.map(base64Url),
+    iv: base64Url(iv),
+    payload: base64Url(Buffer.concat([encrypted, cipher.getAuthTag()]))
+  };
+}
+
+// The two key parts are picked by `version`, and picking the wrong pair yields a
+// key that fails authentication rather than anything diagnosable. The indices
+// mirror Filemoon's player bundle, which maps version n to the 1-based pair
+// [n, 31 - n]; this pins that mapping so a rewrite cannot quietly shift it.
+function testFilemoonPayloadDecryption() {
+  const sources = [{ url: 'https://cdn.example.net/hls/master.m3u8', quality: '1080p' }];
+
+  for (const version of [1, 3, 15, 20]) {
+    assert.deepStrictEqual(
+      decryptFilemoonPayload(buildFilemoonPayload({ sources }, { version })),
+      { sources },
+      `version ${version} selects the right key parts`
+    );
+  }
+
+  // A version outside the table means the whole key_parts list is the key, which
+  // is only a valid AES key length by accident — it must fail, not throw.
+  const payload = buildFilemoonPayload({ sources }, { version: 3 });
+  assert.strictEqual(
+    decryptFilemoonPayload({ ...payload, version: '99' }),
+    null,
+    'an unknown version does not produce a bogus key'
+  );
+
+  assert.strictEqual(decryptFilemoonPayload({ key_parts: [] }), null, 'an empty payload is rejected');
+}
+
 async function run() {
   const tests = [
     ['VOE payload decodes', testVoePayloadDecodes],
@@ -357,7 +411,8 @@ async function run() {
     ['embed69 server gate', testEmbedServerGate],
     ['Packed script iteration', testUnpackedScriptIteration],
     ['Packed stream ad filter', testPackedStreamAdFilter],
-    ['Dead JS redirect falls through', testDeadJsRedirectFallsThrough]
+    ['Dead JS redirect falls through', testDeadJsRedirectFallsThrough],
+    ['Filemoon payload decryption', testFilemoonPayloadDecryption]
   ];
 
   for (const [label, test] of tests) {

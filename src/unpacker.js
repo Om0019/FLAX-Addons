@@ -893,45 +893,101 @@ function extractFilemoonCode(url) {
   }
 }
 
+function buildFilemoonApiUrl(url, code, path) {
+  return new URL(`/api/videos/${encodeURIComponent(code)}/${path}`, url).toString();
+}
+
+function buildFilemoonHeaders(url, userAgent, referer) {
+  return {
+    'User-Agent': userAgent,
+    'Referer': url,
+    'Origin': new URL(url).origin,
+    'Accept': 'application/json',
+    'X-Embed-Origin': referer ? getHostname(referer) : '',
+    'X-Embed-Referer': referer || url,
+    'X-Embed-Parent': referer || url
+  };
+}
+
+/**
+ * The player posts a device attestation alongside the playback request. Its
+ * contents are only used for abuse scoring — the request is refused outright
+ * without one — so a per-request identifier is enough to get a verdict back.
+ */
+function buildFilemoonFingerprint() {
+  return {
+    token: crypto.randomBytes(16).toString('hex'),
+    viewer_id: crypto.randomUUID(),
+    device_id: crypto.randomUUID(),
+    confidence: 0
+  };
+}
+
+/**
+ * Filemoon's embed is a single-page app — the stream is never in the HTML, so the
+ * generic extractor has nothing to work with and the JSON API below is the only
+ * route to it.
+ *
+ * The request shape is taken from the current player bundle
+ * (`/assets/videoPagesBundle-*.js`): the URL is built same-origin as
+ * `/api/videos/<code>/embed/playback`, and playback is a POST carrying a
+ * `fingerprint` object. A GET — which is what this used to send — is answered
+ * `405 method not allowed`, as is a POST without the fingerprint.
+ *
+ * Getting a stream back also needs `captcha_required` to be false for the file.
+ * When it is true the server answers `428 captcha_required` unless an
+ * `X-Captcha-Token` from a solved reCAPTCHA is attached, which cannot be produced
+ * server-side. Every file sampled in July 2026 was gated this way, so the settings
+ * probe short-circuits those rather than spending a second round-trip to be
+ * refused. If that policy ever relaxes, the playback path below is ready for it.
+ */
 async function resolveFilemoon(url, userAgent, referer, signal) {
   if (!isFilemoonHost(url)) return null;
 
   const code = extractFilemoonCode(url);
   if (!code) return null;
 
-  const apiPaths = [
-    `/api/videos/${encodeURIComponent(code)}/embed/playback`,
-    `/api/videos/${encodeURIComponent(code)}/playback`
-  ];
+  const headers = buildFilemoonHeaders(url, userAgent, referer);
 
-  for (const path of apiPaths) {
-    try {
-      const apiUrl = new URL(path, url).toString();
-      const { res, text } = await fetchTextWithTimeout(apiUrl, {
-        headers: {
-          'User-Agent': userAgent,
-          'Referer': url,
-          'Origin': new URL(url).origin,
-          'Accept': 'application/json',
-          'X-Embed-Origin': referer ? getHostname(referer) : '',
-          'X-Embed-Referer': referer || url,
-          'X-Embed-Parent': referer || url
-        },
-        signal
-      }, FILEMOON_API_TIMEOUT_MS);
-      if (!res.ok) continue;
+  try {
+    const { res, text } = await fetchTextWithTimeout(
+      buildFilemoonApiUrl(url, code, 'embed/settings'),
+      { headers, signal },
+      FILEMOON_API_TIMEOUT_MS
+    );
+    if (!res.ok) return null;
 
-      const data = JSON.parse(text);
-      const playback = data.playback || data;
-      const decrypted = decryptFilemoonPayload(playback);
-      const sources = Array.isArray(decrypted?.sources) ? decrypted.sources : [];
-      const direct = sources
-        .map((source) => source?.url)
-        .find((sourceUrl) => /\.(m3u8|mp4|mkv)(?:$|[?#])/i.test(sourceUrl || ''));
-      if (direct) return normalizeUrl(direct, url);
-    } catch (error) {
-      console.warn(`Unpacker: Filemoon API resolve failed for ${url}: ${error.message}`);
+    if (JSON.parse(text)?.captcha_required) {
+      console.log(`Unpacker: Filemoon ${code} requires a captcha; skipping.`);
+      return null;
     }
+  } catch (error) {
+    console.warn(`Unpacker: Filemoon settings probe failed for ${url}: ${error.message}`);
+    return null;
+  }
+
+  try {
+    const { res, text } = await fetchTextWithTimeout(
+      buildFilemoonApiUrl(url, code, 'embed/playback'),
+      {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fingerprint: buildFilemoonFingerprint() }),
+        signal
+      },
+      FILEMOON_API_TIMEOUT_MS
+    );
+    if (!res.ok) return null;
+
+    const data = JSON.parse(text);
+    const decrypted = decryptFilemoonPayload(data.playback || data);
+    const sources = Array.isArray(decrypted?.sources) ? decrypted.sources : [];
+    const direct = sources
+      .map((source) => source?.url)
+      .find((sourceUrl) => /\.(m3u8|mp4|mkv)(?:$|[?#])/i.test(sourceUrl || ''));
+    if (direct) return normalizeUrl(direct, url);
+  } catch (error) {
+    console.warn(`Unpacker: Filemoon API resolve failed for ${url}: ${error.message}`);
   }
 
   return null;
@@ -1154,6 +1210,7 @@ async function resolveDownloadUrl(url, userAgent, referer, options = {}) {
 module.exports = {
   __test: {
     decodeVidguardSignature,
+    decryptFilemoonPayload,
     extractMediafireDirectUrl,
     extractVidguardStream,
     extractVoeDirectStream,
