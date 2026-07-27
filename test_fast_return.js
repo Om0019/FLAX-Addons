@@ -169,7 +169,9 @@ async function testValidatorProbesEachUrlOnce() {
     ]);
 
     assert.strictEqual(first, second, 'repeat probe returns the same result');
-    assert.strictEqual(typeof third, 'boolean', 'a distinct url is probed on its own');
+    // A probe reports playability and whatever it could tell about quality, so the
+    // verdict is a record rather than a bare boolean.
+    assert.strictEqual(typeof third.playable, 'boolean', 'a distinct url is probed on its own');
     assert.strictEqual(validator.started, 2, 'two distinct urls means two probes');
 
     const forStream = fetched.filter((u) => u === stream.url);
