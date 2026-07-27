@@ -269,12 +269,14 @@ function isFileLockerServer(server) {
 function scoreXupalaceServer(server) {
   const s = (server || '').toLowerCase();
   if (s.includes('streamwish') || s.includes('hlswish') || s.includes('vidhide')) return 0;
-  if (s.includes('filemoon')) return 1;
   if (s.includes('dood')) return 2;
   if (s.includes('voe')) return 4;
   if (s.includes('vidguard') || s.includes('listeamed')) return 4;
   if (s.includes('waaw') || s.includes('netu') || s.includes('hqq')) return 5;
   if (s.includes('lulu') || s.includes('vudeo') || s.includes('ahvsh') || s.includes('streamhide')) return 5;
+  // Filemoon gates playback behind a captcha no server-side resolver can answer
+  // (see resolveFilemoon), so it is tried only once everything else has failed.
+  if (s.includes('filemoon')) return 6;
   return 3;
 }
 
@@ -1114,12 +1116,16 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
                         const server = (value.server || '').toLowerCase();
                         if (server === 'vidhide' || server === 'streamwish' || server === 'hlswish') return 0;
                         if (server === 'rapidvideo') return 1;
-                        if (server === 'filemoon') return 2;
                         if (server === 'dood' || server === 'doodstream' || server === 'doodstreaming') return 3;
                         if (server === 'voe') return 5;
                         if (server === 'vidguard' || server === 'listeamed') return 5;
                         if (server === 'luluvdo' || server === 'vudeo' || server === 'streamhide') return 6;
                         if (server === 'netu' || server === 'waaw' || server === 'hqq') return 7;
+                        // Filemoon gates playback behind a captcha no server-side
+                        // resolver can answer (see resolveFilemoon). It ranked 2nd
+                        // here, so it burned one of MAX_EMBED69_ATTEMPTS on every
+                        // page that listed it.
+                        if (server === 'filemoon') return 8;
                         return 2;
                     };
                     return kindScore(a) - kindScore(b) || serverScore(a) - serverScore(b);

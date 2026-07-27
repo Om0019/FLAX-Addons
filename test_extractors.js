@@ -398,6 +398,83 @@ function testFilemoonPayloadDecryption() {
   assert.strictEqual(decryptFilemoonPayload({ key_parts: [] }), null, 'an empty payload is rejected');
 }
 
+/** Builds an embed69 page whose dataLink carries the given servers, encrypted the
+ *  way the site does: AES-256-CBC under a key derived from a solved proof-of-work. */
+function buildEmbed69Page(servers) {
+  const challenge = 'challenge';
+  const salt = 'salt';
+  const difficulty = 2;
+
+  let nonce = 0;
+  let key;
+  for (;;) {
+    if (crypto.createHash('sha256').update(challenge + nonce).digest('hex').startsWith('0'.repeat(difficulty))) {
+      key = crypto.createHash('sha256').update(challenge + nonce + salt).digest();
+      break;
+    }
+    nonce += 1;
+  }
+
+  const encrypt = (plain) => {
+    const iv = crypto.randomBytes(16);
+    const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
+    return Buffer.concat([iv, cipher.update(plain, 'utf8'), cipher.final()]).toString('base64');
+  };
+
+  const dataLink = [{
+    sortedEmbeds: servers.map(({ server, url }) => ({ servername: server, type: 'video', link: encrypt(url) }))
+  }];
+
+  return `<script>const POW_CHALLENGE = '${challenge}';
+const POW_DIFFICULTY = ${difficulty};
+const POW_SALT = '${salt}';
+let dataLink = ${JSON.stringify(dataLink)};</script>`;
+}
+
+// embed69 lists more servers than MAX_EMBED69_ATTEMPTS allows, so the ranking
+// decides which ones are ever tried. Filemoon used to rank second despite being
+// unresolvable server-side, spending an attempt on every page that offered it.
+async function testEmbed69RanksFilemoonLast() {
+  const requested = [];
+
+  const server = http.createServer((req, res) => {
+    requested.push(req.url);
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end('<html><body>no stream here</body></html>');
+  });
+
+  await new Promise((resolve) => server.listen(0, resolve));
+
+  try {
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const html = buildEmbed69Page([
+      { server: 'filemoon', url: `${origin}/filemoon` },
+      { server: 'voe', url: `${origin}/voe` },
+      { server: 'vidhide', url: `${origin}/vidhide` }
+    ]);
+
+    const page = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(html);
+    });
+    await new Promise((resolve) => page.listen(0, resolve));
+
+    try {
+      await resolvePlayerStream(`http://127.0.0.1:${page.address().port}/embed69`, userAgent, 'https://sololatino.net/');
+    } finally {
+      page.close();
+    }
+
+    assert.deepStrictEqual(
+      requested,
+      ['/vidhide', '/voe', '/filemoon'],
+      'filemoon is attempted only after the servers that can actually resolve'
+    );
+  } finally {
+    server.close();
+  }
+}
+
 async function run() {
   const tests = [
     ['VOE payload decodes', testVoePayloadDecodes],
@@ -412,7 +489,8 @@ async function run() {
     ['Packed script iteration', testUnpackedScriptIteration],
     ['Packed stream ad filter', testPackedStreamAdFilter],
     ['Dead JS redirect falls through', testDeadJsRedirectFallsThrough],
-    ['Filemoon payload decryption', testFilemoonPayloadDecryption]
+    ['Filemoon payload decryption', testFilemoonPayloadDecryption],
+    ['embed69 ranks Filemoon last', testEmbed69RanksFilemoonLast]
   ];
 
   for (const [label, test] of tests) {
