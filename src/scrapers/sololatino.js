@@ -2,6 +2,7 @@ const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
 const { fetchJsonWithTimeout, fetchTextWithTimeout, fetchWithTimeout } = require('../http');
 const { cleanText, extractCandidateYears, mapWithConcurrency, raceTitleSearches } = require('./common');
+const { firstResultInOrder } = require('../concurrency');
 const TOKEN_CONCURRENCY = 3;
 const SEARCH_TIMEOUT_MS = 4500;
 const PAGE_TIMEOUT_MS = 5500;
@@ -143,6 +144,8 @@ const PELISSERIESHOY_ORIGIN = 'https://player.pelisserieshoy.com';
 // so a dead lead mirror meant the whole player resolved to nothing even though the
 // next entry would have worked. Bounded because each attempt is two round-trips.
 const PELISSERIESHOY_MAX_SERVERS = 4;
+// All four entries live on the player's single origin, so keep the overlap low.
+const PELISSERIESHOY_CONCURRENCY = 2;
 
 function pelisserieshoyHeaders(userAgent, streamUrl) {
   return {
@@ -216,19 +219,22 @@ async function resolvePelisserieshoy(streamUrl, userAgent, signal) {
 
   if (!sListRes.ok || !Array.isArray(sListJson?.s)) return null;
 
-  for (const entry of sListJson.s.slice(0, PELISSERIESHOY_MAX_SERVERS)) {
-    const serverValue = Array.isArray(entry) ? entry[1] : entry;
-    if (!serverValue) continue;
+  const serverValues = sListJson.s
+    .slice(0, PELISSERIESHOY_MAX_SERVERS)
+    .map((entry) => (Array.isArray(entry) ? entry[1] : entry))
+    .filter(Boolean);
 
+  // Each entry is two round trips, so a dead lead mirror used to cost four before
+  // the next was tried. Overlapped a little, still resolving to the first entry in
+  // the handshake's own order — the list is ranked by the player, not by us.
+  return firstResultInOrder(serverValues, PELISSERIESHOY_CONCURRENCY, async (serverValue) => {
     try {
-      const directUrl = await resolvePelisserieshoyServer(serverValue, token, userAgent, streamUrl, signal);
-      if (directUrl) return directUrl;
+      return await resolvePelisserieshoyServer(serverValue, token, userAgent, streamUrl, signal);
     } catch (error) {
       console.warn(`SoloLatino: pelisserieshoy server ${serverValue} failed: ${error.message}`);
+      return null;
     }
-  }
-
-  return null;
+  });
 }
 
 /**

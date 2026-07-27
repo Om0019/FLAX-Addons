@@ -14,7 +14,7 @@ const dns = require('node:dns').promises;
 const netGuard = require('./src/net-guard');
 const { assertPublicUrl } = netGuard;
 const { createTtlCache } = require('./src/ttl-cache');
-const { firstResultInOrder } = require('./src/unpacker').__test;
+const { firstResultInOrder } = require('./src/concurrency');
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));

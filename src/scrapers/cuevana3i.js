@@ -2,10 +2,15 @@ const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
 const { fetchTextWithTimeout, fetchWithTimeout } = require('../http');
 const { cleanText, mapWithConcurrency } = require('./common');
+const { firstResultInOrder } = require('../concurrency');
 const PLAYER_CONCURRENCY = 5;
 const PLAYER_RESOLVE_TIMEOUT_MS = 1800;
 const PAGE_TIMEOUT_MS = 5000;
 const PROBE_TIMEOUT_MS = 2500;
+// Candidate page URLs are all on cuevana3i itself, so this stays lower than the
+// mirror concurrency elsewhere: it shortens a chain of wrong guesses without
+// turning one lookup into a burst at a single origin.
+const PROBE_CONCURRENCY = 2;
 // Every wrapper costs at least one fetch, and pages list far more of them than are
 // worth trying. Bounded rather than filtered by kind, so the ranking decides which
 // ones make the cut.
@@ -210,15 +215,20 @@ async function scrape(title, originalTitle, year, type, season, episode, options
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   try {
-    let bestMatch = null;
     const candidates = buildPageCandidates(type, title, originalTitle, extraTitles);
 
-    for (const candidate of candidates) {
-      bestMatch = await probePage(candidate, userAgent, signal);
-      if (bestMatch) {
-        console.log(`Cuevana3i: Using candidate URL ${bestMatch.url}`);
-        break;
-      }
+    // This site has no search endpoint, so the page URL is guessed from the title
+    // and the guesses are probed until one exists. Probing them one at a time made
+    // that a full page fetch per wrong guess before anything else could start, and
+    // a title whose Spanish slug is not the one the site used pays every earlier
+    // guess in the list. Overlap is small because every candidate is the same
+    // origin — this is a bounded overlap, not a burst at cuevana3i.
+    const bestMatch = await firstResultInOrder(candidates, PROBE_CONCURRENCY, (candidate) => (
+      probePage(candidate, userAgent, signal)
+    ));
+
+    if (bestMatch) {
+      console.log(`Cuevana3i: Using candidate URL ${bestMatch.url}`);
     }
 
     if (!bestMatch) {
