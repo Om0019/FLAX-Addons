@@ -9,7 +9,7 @@ const { BlockedAddressError, MAX_REDIRECT_HOPS, UnresolvableHostError, assertPub
 const app = express();
 const PROXY_FETCH_TIMEOUT_MS = 8000;
 const DEFAULT_REFERER = 'https://sololatino.net/';
-const DEFAULT_USER_AGENT ='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 // Enable CORS for Stremio client compatibility
 app.use(cors());
