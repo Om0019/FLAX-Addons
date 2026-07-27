@@ -11,6 +11,7 @@ const http = require('http');
 process.env.ALLOW_PRIVATE_PROXY_TARGETS = '1';
 
 const app = require('./src/server');
+const unpacker = require('./src/unpacker');
 const scrapers = require('./src/scrapers');
 const { withQualityLabel, qualityFromManifest, qualityFromLabel } = require('./src/quality');
 
@@ -302,6 +303,81 @@ async function testCompleteMasterWithNoVariantIsStillRejected() {
   }
 }
 
+/**
+ * DoodStream rebranded to playmogo.com. Every mirror — dood.li, d000d.com,
+ * ds2play.com and the rest — answers 301 to playmogo.com/e/<code>, so recognising
+ * only the old dood.* names left a source handing over any of the others
+ * unrouted. Checked against the live hosts in July 2026.
+ */
+function testDoodHostRecognitionCoversTheRebrand() {
+  const { isDoodHost } = unpacker.__test;
+
+  for (const url of [
+    'https://dood.li/e/abc', 'https://dood.to/e/abc', 'https://dood.stream/e/abc',
+    'https://dood.re/e/abc', 'https://dood.yt/e/abc',
+    'https://d000d.com/e/abc', 'https://d0000d.com/e/abc', 'https://d0o0d.com/e/abc',
+    'https://dooood.com/e/abc', 'https://all3do.com/e/abc', 'https://doply.net/e/abc',
+    'https://vide0.net/e/abc', 'https://ds2play.com/e/abc', 'https://ds2video.com/e/abc',
+    'https://doodstream.com/e/abc', 'https://doodstream.co/e/abc',
+    'https://playmogo.com/e/abc'
+  ]) {
+    assert.strictEqual(isDoodHost(url), true, `${url} is a Dood mirror`);
+  }
+
+  // The pattern must not widen into unrelated hosts.
+  for (const url of [
+    'https://sololatino.net/e/abc', 'https://filemoon.sx/e/abc',
+    'https://notdood.example.com/e/abc', 'https://playmogo.com.evil.example/e/abc',
+    'https://mydood.org/e/abc'
+  ]) {
+    assert.strictEqual(isDoodHost(url), false, `${url} is not a Dood mirror`);
+  }
+}
+
+/**
+ * Dood is now gated the same way Filemoon and VOE are, so it belongs where they
+ * are: last. Ranked third best it cost every page that listed it a fetch and a
+ * resolve timeout against a Cloudflare challenge page, ahead of servers that hand
+ * over a stream — and on embed69 it also burned one of MAX_EMBED69_ATTEMPTS.
+ */
+function testChallengeGatedHostsRankBehindResolvableOnes() {
+  const servers = [
+    { url: 'https://x/1', server: 'dood' },
+    { url: 'https://x/2', server: 'filemoon' },
+    { url: 'https://x/3', server: 'vidguard' },
+    { url: 'https://x/4', server: 'streamwish' },
+    { url: 'https://x/5', server: 'luluvdo' }
+  ];
+
+  const html = servers
+    .map((entry) => `<div onclick="go_to_playerVast('${entry.url}', 1, 0)"><span>${entry.server}</span></div>`)
+    .join('');
+
+  const ordered = unpacker.extractXupalaceServers(html, 'https://xupalace.org/page');
+  assert.strictEqual(ordered.length, servers.length, 'every server on the page is picked up');
+
+  // extractXupalaceServers preserves page order; the ranking is what resolve
+  // applies, so assert on the comparator's own verdict.
+  const rank = (name) => ordered.findIndex((entry) => entry.server === name);
+  assert(rank('dood') >= 0, 'dood is still offered, not dropped');
+
+  const { scoreXupalaceServer } = unpacker.__test;
+  assert(
+    scoreXupalaceServer('dood') > scoreXupalaceServer('vidguard'),
+    'dood is attempted after hosts that resolve'
+  );
+  assert.strictEqual(
+    scoreXupalaceServer('dood'),
+    scoreXupalaceServer('filemoon'),
+    'dood sits with the other challenge-gated hosts'
+  );
+  assert.strictEqual(
+    scoreXupalaceServer('playmogo'),
+    scoreXupalaceServer('filemoon'),
+    'and so does the name it rebranded to'
+  );
+}
+
 (async () => {
   testForwardedProtoListIsNotPastedIntoTheBaseUrl();
   console.log('ok - X-Forwarded-Proto lists do not corrupt rewritten manifest URLs');
@@ -317,6 +393,12 @@ async function testCompleteMasterWithNoVariantIsStillRejected() {
 
   await testCompleteMasterWithNoVariantIsStillRejected();
   console.log('ok - a complete master naming no variant is still rejected');
+
+  testDoodHostRecognitionCoversTheRebrand();
+  console.log('ok - Dood host recognition covers the playmogo rebrand');
+
+  testChallengeGatedHostsRankBehindResolvableOnes();
+  console.log('ok - challenge-gated hosts rank behind ones that resolve');
 
   console.log('\nPlayback regression tests passed');
 })().catch((error) => {
