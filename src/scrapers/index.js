@@ -60,6 +60,13 @@ const MAX_VALIDATION_CANDIDATES = 8;
 // other, so the earliest source's streams sat unchecked until the slowest source
 // finished. Capped so an early source cannot spend the whole budget.
 const MAX_EAGER_VALIDATIONS = 8;
+// Alternative titles only widen the pool of names the scrapers search for, so they
+// are worth a short wait and nothing more. On the IMDb path the lookup cannot even
+// start until the id mapping comes back, which put two full TMDB deadlines — up to
+// 10s — ahead of the first scraper request on a cold lookup. Giving up early costs
+// the extra titles for this request only: the call is left running and its answer
+// lands in the TMDB cache for the next one.
+const ALTERNATIVE_TITLES_MAX_WAIT_MS = 1500;
 const STREAM_CACHE_TTL_MS = 10 * 60 * 1000;
 const EMPTY_STREAM_CACHE_TTL_MS = 15 * 1000;
 const ENABLE_CINEHDPLUS = false;
@@ -384,6 +391,20 @@ async function collectScraperResults(tasks, timeoutMs, onResult) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Resolves `promise`, or `fallbackValue` if it takes longer than `timeoutMs`. The
+ * promise itself is left to finish — this bounds how long a caller waits, not the
+ * work — so it must be one that settles on its own and never rejects.
+ */
+function resolveWithin(promise, timeoutMs, fallbackValue) {
+  let timeoutId;
+  const fallback = new Promise((resolve) => {
+    timeoutId = setTimeout(() => resolve(fallbackValue), timeoutMs);
+  });
+
+  return Promise.race([promise, fallback]).finally(() => clearTimeout(timeoutId));
 }
 
 function createScraperTask(scraper, label, args, timeoutMs, extraTitles = []) {
@@ -933,8 +954,17 @@ async function getStreamsUncached(type, id, season, episode) {
     // 1b. Widen the title pool with any other Spanish regional dub names
     // TMDB knows about (sites don't all agree on which one they use).
     const knownTitles = new Set([cleanComparableTitle(title), cleanComparableTitle(originalTitle)]);
-    const alternativeTitles = await (alternativeTitlesPromise || tmdb.getAlternativeTitles(type, tmdbId));
-    const extraTitles = alternativeTitles.filter((candidate) => {
+    const alternativeTitles = await resolveWithin(
+      alternativeTitlesPromise || tmdb.getAlternativeTitles(type, tmdbId),
+      ALTERNATIVE_TITLES_MAX_WAIT_MS,
+      null
+    );
+
+    if (alternativeTitles === null) {
+      console.warn(`Orchestrator: Alternative titles did not arrive within ${ALTERNATIVE_TITLES_MAX_WAIT_MS}ms; starting scrapers without them.`);
+    }
+
+    const extraTitles = (alternativeTitles || []).filter((candidate) => {
       const clean = cleanComparableTitle(candidate);
       if (!clean || knownTitles.has(clean)) return false;
       knownTitles.add(clean);
