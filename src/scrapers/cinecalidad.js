@@ -371,8 +371,11 @@ async function scrape(title, originalTitle, year, type, season, episode, options
 
     const downloadTargets = await Promise.all(
       downloadPageLinks.map(async (downloadLink) => {
-        const resolvedUrl = await resolveDownloadPage(downloadLink.downloadPageUrl, userAgent, targetPageUrl, signal);
-        if (!resolvedUrl) return null;
+        const pageUrl = await resolveDownloadPage(downloadLink.downloadPageUrl, userAgent, targetPageUrl, signal);
+        if (!pageUrl) return null;
+        // A download mirror's landing page is HTML and never passes the playability
+        // check, so it has to be turned into the file it points at first.
+        const resolvedUrl = await unpacker.resolveDownloadUrl(pageUrl, userAgent, targetPageUrl, { signal });
         const isPlayable = await isPlayableDownloadTarget(resolvedUrl, userAgent, targetPageUrl, signal);
         if (!isPlayable) return null;
 
@@ -398,14 +401,15 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     }
 
     for (const link of externalDownloadLinks) {
-      const isPlayable = await isPlayableDownloadTarget(link.downloadUrl, userAgent, targetPageUrl, signal);
+      const downloadUrl = await unpacker.resolveDownloadUrl(link.downloadUrl, userAgent, targetPageUrl, { signal });
+      const isPlayable = await isPlayableDownloadTarget(downloadUrl, userAgent, targetPageUrl, signal);
       if (!isPlayable) continue;
 
-      if (!streams.some((stream) => stream.url === link.downloadUrl)) {
+      if (!streams.some((stream) => stream.url === downloadUrl)) {
         streams.push({
           name: 'Cinecalidad',
           title: `⬇ ${link.serverName}`,
-          url: link.downloadUrl,
+          url: downloadUrl,
           behaviorHints: {
             notWebReady: true,
             proxyHeaders: {
