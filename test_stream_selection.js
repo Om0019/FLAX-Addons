@@ -339,6 +339,123 @@ async function testSlowVariantDoesNotRejectTheMaster() {
   }
 }
 
+/**
+ * turboviplay answers for files it no longer has with `#EXTM3U\n#EXT-X-VERSION:6`
+ * and nothing else. It is a well-formed, empty playlist: it names no variants and
+ * no segments, so there is nothing to play, but treating the #EXTM3U header alone
+ * as proof of life confirmed it and put it at the top of the list.
+ */
+/**
+ * A gateway error on the variant is about the variant: the master just loaded over
+ * the same route. Treating 5xx as inconclusive let exactly the streams this probe
+ * exists to catch survive it.
+ */
+async function testVariantGatewayErrorRejectsTheMaster() {
+  const server = http.createServer((req, res) => {
+    if (req.url.startsWith('/dead-variant/')) {
+      res.writeHead(503, { 'content-type': 'text/plain' });
+      res.end('upstream connect error');
+      return;
+    }
+    if (req.url.startsWith('/rate-limited-variant/')) {
+      res.writeHead(429, { 'content-type': 'text/plain' });
+      res.end('slow down');
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' });
+    const variant = req.url.includes('gateway') ? '/dead-variant/i.m3u8' : '/rate-limited-variant/i.m3u8';
+    res.end(`#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1280000\n${variant}\n`);
+  });
+  await new Promise((resolve) => server.listen(0, resolve));
+
+  try {
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const gatewayUrl = `${origin}/gateway/master.m3u8`;
+    const rateLimitedUrl = `${origin}/ratelimited/master.m3u8`;
+
+    const orchestrator = loadOrchestratorWith({
+      LaMovie: stubScraper('LaMovie', [gatewayUrl]),
+      Cuevana3i: stubScraper('Cuevana3i', [rateLimitedUrl])
+    });
+
+    const streams = await orchestrator.getStreams('movie', 'tmdb:movie:10', null, null);
+    assert.deepStrictEqual(
+      streams.map((stream) => stream.url),
+      [rateLimitedUrl],
+      'a 503 variant rejects its master; a 429 one is transient and survives'
+    );
+  } finally {
+    server.close();
+  }
+}
+
+async function testEmptyPlaylistIsRejected() {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' });
+    if (req.url.startsWith('/empty/')) {
+      res.end('#EXTM3U\n#EXT-X-VERSION:6\n');
+      return;
+    }
+    res.end('#EXTM3U\n#EXTINF:6.000,\nsegment001.ts\n');
+  });
+  await new Promise((resolve) => server.listen(0, resolve));
+
+  try {
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const emptyUrl = `${origin}/empty/master.m3u8`;
+    const realUrl = `${origin}/real/master.m3u8`;
+
+    const orchestrator = loadOrchestratorWith({
+      LaMovie: stubScraper('LaMovie', [emptyUrl]),
+      Cuevana3i: stubScraper('Cuevana3i', [realUrl])
+    });
+
+    const streams = await orchestrator.getStreams('movie', 'tmdb:movie:8', null, null);
+    assert.deepStrictEqual(
+      streams.map((stream) => stream.url),
+      [realUrl],
+      'a playlist naming neither variants nor segments is dropped'
+    );
+  } finally {
+    server.close();
+  }
+}
+
+/**
+ * The emptiness check must only fire on a body we read to the end. Probes read a
+ * fixed window, and a playlist can legitimately open with a long run of
+ * #EXT-X-MEDIA renditions before its first #EXT-X-STREAM-INF.
+ */
+async function testLongHeaderPlaylistIsNotJudgedEmpty() {
+  const renditions = Array.from({ length: 40 }, (_, i) => (
+    `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Track ${i}",LANGUAGE="es-${i}",URI="audio/${i}/index.m3u8"`
+  )).join('\n');
+  const playlist = `#EXTM3U\n${renditions}\n#EXT-X-STREAM-INF:BANDWIDTH=1280000\nvariant/index.m3u8\n`;
+  assert.ok(playlist.length > 2048, 'fixture must overflow the probe window to be meaningful');
+
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' });
+    res.end(playlist);
+  });
+  await new Promise((resolve) => server.listen(0, resolve));
+
+  try {
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const url = `${origin}/master.m3u8`;
+
+    const orchestrator = loadOrchestratorWith({ LaMovie: stubScraper('LaMovie', [url]) });
+    const streams = await orchestrator.getStreams('movie', 'tmdb:movie:9', null, null);
+
+    assert.deepStrictEqual(
+      streams.map((stream) => stream.url),
+      [url],
+      'a playlist whose entries fall outside the probe window is not called empty'
+    );
+  } finally {
+    server.close();
+  }
+}
+
 async function run() {
   const tests = [
     ['Unproven streams survive the early exit', testUnprovenStreamsSurviveTheEarlyExit],
@@ -347,7 +464,10 @@ async function run() {
     ['Extensionless manifest is playable', testExtensionlessManifestIsPlayable],
     ['m3u8 in a query string is not a manifest', testM3u8InQueryStringIsNotTreatedAsManifest],
     ['Master playlist with a dead variant is rejected', testMasterPlaylistWithDeadVariantIsRejected],
-    ['Slow variant does not reject the master', testSlowVariantDoesNotRejectTheMaster]
+    ['Slow variant does not reject the master', testSlowVariantDoesNotRejectTheMaster],
+    ['Variant gateway error rejects the master', testVariantGatewayErrorRejectsTheMaster],
+    ['Empty playlist is rejected', testEmptyPlaylistIsRejected],
+    ['Long-header playlist is not judged empty', testLongHeaderPlaylistIsNotJudgedEmpty]
   ];
 
   for (const [label, test] of tests) {

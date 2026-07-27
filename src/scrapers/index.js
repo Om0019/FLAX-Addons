@@ -40,6 +40,10 @@ const STREAM_VALIDATION_FAST_TIMEOUT_MS = 2400;
 // has to catch a host that is refusing or gone, and an inconclusive answer leaves
 // the stream in the candidate list rather than dropping it.
 const HLS_VARIANT_VALIDATION_TIMEOUT_MS = 1500;
+// Probes read this many bytes. It also tells a truncated body from a complete one,
+// which is what lets an empty playlist be told apart from one that simply has not
+// been read far enough yet.
+const PROBE_RANGE_BYTES = 2048;
 const MIN_CONFIRMED_STREAMS = 3;
 const MAX_VALIDATION_CANDIDATES = 8;
 // Streams are probed as each source reports in, rather than waiting for every
@@ -469,6 +473,22 @@ function isMasterPlaylist(body) {
   return body.includes('#EXT-X-STREAM-INF') && !body.includes('#EXTINF');
 }
 
+/** Whether a playlist names anything to play, rather than being a bare header. */
+function hasPlaylistEntries(body) {
+  return body.includes('#EXT-X-STREAM-INF') || body.includes('#EXTINF');
+}
+
+/**
+ * Probes ask for PROBE_RANGE_BYTES, so a body that fills the window may have been
+ * cut off and the absence of an entry proves nothing. A short body is the whole
+ * file, and there the absence is real. This is what keeps the emptiness check
+ * above from failing a legitimate playlist that opens with a long run of
+ * #EXT-X-MEDIA renditions.
+ */
+function isCompleteProbeBody(body) {
+  return Buffer.byteLength(body) < PROBE_RANGE_BYTES;
+}
+
 /**
  * First playlist URI in a master playlist, resolved against the manifest URL.
  * The probe asks for a 2KB range so the body can stop mid-line; the final line is
@@ -500,16 +520,24 @@ async function probeHlsVariant(variantUrl, headers, signal) {
   try {
     const { res, text } = await fetchTextWithTimeout(variantUrl, {
       method: 'GET',
-      headers: { ...headers, Range: 'bytes=0-2047' },
+      headers: { ...headers, Range: `bytes=0-${PROBE_RANGE_BYTES - 1}` },
       redirect: 'follow',
       signal
     }, HLS_VARIANT_VALIDATION_TIMEOUT_MS);
 
-    if ([401, 403, 404, 410, 451].includes(res.status)) return false;
-    if (!res.ok && res.status !== 206) return null;
+    // The master loaded over this same path a moment ago, so the route works and
+    // any status the variant returns is about the variant. Treating 5xx as merely
+    // inconclusive let a master whose variant hosts are gone survive validation
+    // and be offered — the failure this whole probe exists to catch. Only an
+    // explicit rate limit is genuinely transient.
+    if (res.status === 429) return null;
+    if (!res.ok && res.status !== 206) return false;
     if (isHtmlResponse(res)) return false;
+    if (hasPlaylistEntries(text)) return true;
 
-    return /#EXTM3U|#EXTINF|#EXT-X-STREAM-INF/.test(text) ? true : null;
+    // A variant that came back whole and still names nothing is an empty
+    // playlist. Truncated, it is only unread.
+    return isCompleteProbeBody(text) ? false : null;
   } catch (error) {
     // A host that does not resolve at all is a definite answer. A timeout is not.
     const code = error?.cause?.code || '';
@@ -532,7 +560,7 @@ async function isPlayableStream(stream, signal) {
     'User-Agent': stream?.behaviorHints?.proxyHeaders?.request?.['User-Agent']
       || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Referer': stream?.behaviorHints?.proxyHeaders?.request?.Referer || 'https://sololatino.net/',
-    'Range': 'bytes=0-2047'
+    'Range': `bytes=0-${PROBE_RANGE_BYTES - 1}`
   };
 
   try {
@@ -572,7 +600,16 @@ async function isPlayableStream(stream, signal) {
         });
         return false;
       }
-      const playable = body.includes('#EXTM3U') || body.includes('#EXT-X-STREAM-INF') || body.includes('#EXTINF');
+      // #EXTM3U on its own is an empty container, not a stream. turboviplay serves
+      // exactly that — `#EXTM3U\n#EXT-X-VERSION:6` and nothing else — for files it
+      // no longer has, and counting the header alone as playable confirmed those
+      // and put them at the top of the list. A playlist has to name something:
+      // variants or segments.
+      const playable = hasPlaylistEntries(body) || !isCompleteProbeBody(body);
+
+      if (!playable && isCompleteProbeBody(body)) {
+        console.log(`Scraper orchestrator: Filtering empty playlist with no variants or segments: ${stream.url}`);
+      }
 
       // A master playlist that loads is not yet a stream that plays: it only
       // names other playlists, and those live on separate hosts that can be gone
