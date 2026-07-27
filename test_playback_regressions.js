@@ -604,6 +604,98 @@ async function testDeadHostAndRefusedAddressAreDifferentFailures() {
   }
 }
 
+/**
+ * A certificate the runtime will not accept is a verdict, not a shortfall of
+ * budget. It matters here because these streams reach a viewer through this
+ * addon's proxy: what Node refuses to fetch is exactly what cannot be played.
+ *
+ * Live, pelisplus serves every stream from a bare IPv4 address whose certificate
+ * does not cover it — six sampled, four addresses, two netblocks, all
+ * ERR_TLS_CERT_ALTNAME_INVALID. Treating that as inconclusive would keep a stream
+ * that can never play.
+ */
+function testCertificateFailuresAreVerdicts() {
+  const { isDefiniteFetchFailure } = scrapers.__test;
+  const withCode = (code) => Object.assign(new Error('fetch failed'), { cause: { code } });
+
+  for (const code of [
+    'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED', 'SELF_SIGNED_CERT_IN_CHAIN',
+    'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    'ERR_SSL_WRONG_VERSION_NUMBER', 'ENOTFOUND', 'ECONNREFUSED', 'EHOSTUNREACH', 'ERR_INVALID_URL'
+  ]) {
+    assert.strictEqual(isDefiniteFetchFailure(withCode(code)), true, `${code} is a verdict`);
+  }
+
+  // Anything that only says "we ran out of road" is not.
+  for (const code of ['ETIMEDOUT', 'ECONNRESET', 'EPIPE', 'UND_ERR_HEADERS_TIMEOUT', '']) {
+    assert.strictEqual(isDefiniteFetchFailure(withCode(code)), false, `${code || '(none)'} is not a verdict`);
+  }
+  assert.strictEqual(isDefiniteFetchFailure(new Error('boom')), false, 'an error with no code says nothing');
+}
+
+/**
+ * The same thing end to end, against a server presenting a certificate for a
+ * different name — the shape pelisplus serves.
+ */
+async function testBadCertificateStreamIsDropped() {
+  const { execFileSync } = require('node:child_process');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const nodePath = require('node:path');
+  const https = require('node:https');
+
+  const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'latino-cert-'));
+  try {
+    execFileSync('openssl', [
+      'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+      '-subj', '/CN=not-this-host.example',
+      '-keyout', nodePath.join(dir, 'key.pem'), '-out', nodePath.join(dir, 'cert.pem')
+    ], { stdio: 'ignore' });
+
+    const server = https.createServer({
+      key: fs.readFileSync(nodePath.join(dir, 'key.pem')),
+      cert: fs.readFileSync(nodePath.join(dir, 'cert.pem'))
+    }, (req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
+      res.end('#EXTM3U\n#EXTINF:4,\nseg.ts\n');
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+    try {
+      const { hostHealth: health, createStreamValidator: make } = scrapers.__test;
+      health.clear();
+      // The playlist behind it is perfectly good; only the certificate is wrong.
+      const url = `https://127.0.0.1:${server.address().port}/master.m3u8`;
+      const verdict = await make(new AbortController().signal).validate({ url, title: 'bad cert' });
+
+      assert.strictEqual(verdict.playable, false, 'a certificate the runtime rejects is not playable');
+      assert.strictEqual(verdict.conclusive, true, 'and that is a verdict, not a shortfall of budget');
+      health.clear();
+    } finally {
+      server.close();
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * And the ranking that follows: a host that cannot present a usable certificate
+ * must not be offered ahead of hosts that play. Bare-IPv4 hosts were scored best
+ * of all, so the stream at the top of the list was the one that could not play.
+ */
+function testBareIpHostsDoNotRankFirst() {
+  const { sortStreams } = scrapers.__test;
+  const ordered = sortStreams([
+    { name: 'ip', title: 'pelisplus', url: 'https://45.156.158.200/v4/abc/master.m3u8' },
+    { name: 'cdn', title: 'goodstream', url: 'https://hls2.goodstream.one/x/master.m3u8' },
+    { name: 'other', title: 'vimeos', url: 'https://s8.vimeos.net/x/master.m3u8' }
+  ]);
+
+  assert.notStrictEqual(ordered[0].name, 'ip', 'a bare-IP host no longer leads the list');
+  assert.strictEqual(ordered[ordered.length - 1].name, 'ip', 'it goes last');
+}
+
 (async () => {
   testForwardedProtoListIsNotPastedIntoTheBaseUrl();
   console.log('ok - X-Forwarded-Proto lists do not corrupt rewritten manifest URLs');
@@ -640,6 +732,15 @@ async function testDeadHostAndRefusedAddressAreDifferentFailures() {
 
   await testDeadHostAndRefusedAddressAreDifferentFailures();
   console.log('ok - a dead host and a refused address are different failures');
+
+  testCertificateFailuresAreVerdicts();
+  console.log('ok - certificate failures are verdicts, not budget shortfalls');
+
+  await testBadCertificateStreamIsDropped();
+  console.log('ok - a stream behind a bad certificate is dropped');
+
+  testBareIpHostsDoNotRankFirst();
+  console.log('ok - bare-IP hosts no longer lead the stream list');
 
   console.log('\nPlayback regression tests passed');
 })().catch((error) => {

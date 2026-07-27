@@ -234,7 +234,15 @@ function scoreStream(stream) {
   const healthPenalty = getHostPenalty(getHostHealth(host));
   let baseScore = 9;
 
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) baseScore = 0;
+  // Bare-IPv4 hosts are pelisplus, and it serves HTTPS on addresses its certificates
+  // do not cover: every stream sampled in July 2026 failed
+  // ERR_TLS_CERT_ALTNAME_INVALID, across four addresses on two netblocks. These
+  // streams reach a viewer through this addon's proxy, so a certificate Node will
+  // not accept is one the viewer cannot play either, and ranking them best of all
+  // put a stream that cannot play at the top of the list. Ranked last rather than
+  // dropped: the day pelisplus fixes its certificates they work again, and nothing
+  // else about them is wrong.
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) baseScore = 10;
   else if (host.includes('turboviplay.com')) baseScore = 1;
   else if (host.includes('vimeos')) baseScore = 2;
   else if (host.includes('acek-cdn.com')) baseScore = 3;
@@ -656,9 +664,8 @@ async function probeHlsVariant(variantUrl, headers, signal) {
     // playlist. Truncated, it is only unread.
     return isCompleteProbeBody(text) ? false : null;
   } catch (error) {
-    // A host that does not resolve at all is a definite answer. A timeout is not.
-    const code = error?.cause?.code || '';
-    return ['ENOTFOUND', 'ERR_INVALID_URL', 'ECONNREFUSED'].includes(code) ? false : null;
+    // A host that is definitively not there is an answer. A timeout is not.
+    return isDefiniteFetchFailure(error) ? false : null;
   }
 }
 
@@ -687,13 +694,33 @@ function verdict(playable, quality = null, { conclusive = true } = {}) {
   return { playable, quality, conclusive };
 }
 
-/**
- * Whether a thrown fetch error is a finding about the stream. A host that does not
- * resolve or refuses the connection is a definite answer; a deadline is not. Kept
- * in step with probeHlsVariant, which draws the same line on the same codes.
- */
+// Failures that describe the endpoint rather than our budget. A host that does not
+// resolve, refuses the connection, or presents a certificate that cannot be
+// verified answers the next request the same way and answers the viewer's player
+// the same way, so each of these is a verdict. A deadline is not.
+//
+// The certificate cases are not hypothetical: pelisplus serves its streams from
+// bare IPv4 addresses whose certificates do not cover the address, and every one
+// sampled failed ERR_TLS_CERT_ALTNAME_INVALID. Those streams reach a viewer through
+// this addon's proxy, so what Node refuses to fetch is exactly what cannot play.
+const DEFINITE_FETCH_FAILURE_CODES = new Set([
+  'ENOTFOUND',
+  'ECONNREFUSED',
+  'EHOSTUNREACH',
+  'ERR_INVALID_URL'
+]);
+
 function isDefiniteFetchFailure(error) {
-  return ['ENOTFOUND', 'ECONNREFUSED', 'ERR_INVALID_URL'].includes(error?.cause?.code || '');
+  const code = error?.cause?.code || '';
+  if (!code) return false;
+  return DEFINITE_FETCH_FAILURE_CODES.has(code)
+    // The TLS verification family, which OpenSSL and Node spell several ways:
+    // ERR_TLS_CERT_ALTNAME_INVALID, ERR_SSL_WRONG_VERSION_NUMBER, CERT_HAS_EXPIRED,
+    // SELF_SIGNED_CERT_IN_CHAIN, UNABLE_TO_VERIFY_LEAF_SIGNATURE, HOSTNAME_MISMATCH.
+    || /^ERR_(?:TLS|SSL)_/.test(code)
+    || /^UNABLE_TO_/.test(code)
+    || code.includes('CERT')
+    || code === 'HOSTNAME_MISMATCH';
 }
 
 async function isPlayableStream(stream, signal) {
@@ -820,13 +847,15 @@ async function isPlayableStream(stream, signal) {
     }
 
     const timedOut = error.message.includes('timeout');
+    const definite = !timedOut && isDefiniteFetchFailure(error);
     console.log(`Scraper orchestrator: ${timedOut ? 'Could not verify' : 'Filtering'} stream: ${stream.url} (${error.message})`);
     // Health still counts a timeout — a host that keeps running out the clock is a
-    // bad bet even though no single timeout proves anything about one stream.
-    recordHostHealth(stream, timedOut ? 'timeout' : 'soft-fail', {
+    // bad bet even though no single timeout proves anything about one stream — and
+    // counts a permanent failure as the hard one it is.
+    recordHostHealth(stream, timedOut ? 'timeout' : (definite ? 'hard-fail' : 'soft-fail'), {
       latencyMs: Date.now() - startedAt
     });
-    return verdict(false, null, { conclusive: !timedOut && isDefiniteFetchFailure(error) });
+    return verdict(false, null, { conclusive: definite });
   }
 }
 
@@ -1203,6 +1232,7 @@ module.exports = {
     streamCache,
     hostHealth,
     createStreamValidator,
+    isDefiniteFetchFailure,
     startEagerValidation,
     validatePlayableStreams,
     firstVariantUrl,
