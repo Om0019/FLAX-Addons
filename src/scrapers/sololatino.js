@@ -3,11 +3,52 @@ const unpacker = require('../unpacker');
 const { fetchJsonWithTimeout, fetchTextWithTimeout, fetchWithTimeout } = require('../http');
 const { cleanText, extractCandidateYears, mapWithConcurrency, raceTitleSearches } = require('./common');
 const { firstResultInOrder } = require('../concurrency');
+const { createTtlCache } = require('../ttl-cache');
 const TOKEN_CONCURRENCY = 3;
 const SEARCH_TIMEOUT_MS = 4500;
 const PAGE_TIMEOUT_MS = 5500;
 const API_TIMEOUT_MS = 5000;
 const PROBE_TIMEOUT_MS = 2500;
+
+// Statuses that mean "this host is not serving us right now" rather than "this
+// title is not here". They are a property of the caller, not of the request, so
+// the next request will get the same answer and there is nothing to retry.
+const REFUSAL_STATUSES = new Set([401, 403, 405, 429, 503]);
+// How long a refusal is trusted for. Long enough that a blocked deployment stops
+// spending its request budget on a host that will not answer, short enough that
+// service coming back is picked up within a few lookups.
+const REFUSAL_TTL_MS = 5 * 60 * 1000;
+const refusalCache = createTtlCache({ maxEntries: 4 });
+const REFUSAL_KEY = 'sololatino.net';
+
+/**
+ * The site sits behind Cloudflare, which scores requests partly on how complete
+ * their headers look. A lone User-Agent is the shape of a script, so send what the
+ * browser the User-Agent claims to be would actually send. This does not defeat a
+ * block aimed at the address itself — see the note in scrape().
+ */
+function browserHeaders(userAgent, extra = {}) {
+  return {
+    'User-Agent': userAgent,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    ...extra
+  };
+}
+
+function noteRefusal(status, where) {
+  if (!REFUSAL_STATUSES.has(status)) return false;
+  if (refusalCache.get(REFUSAL_KEY) === undefined) {
+    console.warn(`SoloLatino: Host refused us with HTTP ${status} at ${where}; skipping this source for ${REFUSAL_TTL_MS / 1000}s`);
+  }
+  refusalCache.set(REFUSAL_KEY, status, REFUSAL_TTL_MS);
+  return true;
+}
 
 
 function slugifyTitle(str) {
@@ -110,7 +151,7 @@ function pageHasRequestedYear(html, year) {
 
 async function probeFallbackCandidate(candidate, year, userAgent, signal) {
   const { res: probeRes, text: html } = await fetchTextWithTimeout(candidate.url, {
-    headers: { 'User-Agent': userAgent },
+    headers: browserHeaders(userAgent),
     signal
   }, PROBE_TIMEOUT_MS);
 
@@ -119,6 +160,7 @@ async function probeFallbackCandidate(candidate, year, userAgent, signal) {
     // a bare "No matching content found", which reads as "the site does not have
     // this title" when it can equally mean the host turned us away.
     console.warn(`SoloLatino: Fallback probe ${candidate.url} returned HTTP ${probeRes.status}`);
+    noteRefusal(probeRes.status, 'fallback probe');
     return null;
   }
   if (year && !pageHasRequestedYear(html, year)) {
@@ -248,14 +290,28 @@ async function scrape(title, originalTitle, year, type, season, episode, options
   const { signal, extraTitles = [] } = options;
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
+  // A refusal is about the caller, not the title, so a fresh one means every
+  // request this scraper would make is already answered. Bailing here hands the
+  // orchestrator its empty result immediately instead of ten seconds from now.
+  const activeRefusal = refusalCache.get(REFUSAL_KEY);
+  if (activeRefusal !== undefined) {
+    console.log(`SoloLatino: Skipping source; host last refused us with HTTP ${activeRefusal}`);
+    return [];
+  }
+
+  let hostRefused = false;
+
   async function performSearch(searchQuery) {
     const searchUrl = `https://sololatino.net/buscar?q=${encodeURIComponent(searchQuery)}`;
     const { res, text: html } = await fetchTextWithTimeout(searchUrl, {
-      headers: { 'User-Agent': userAgent },
+      headers: browserHeaders(userAgent),
       signal
     }, SEARCH_TIMEOUT_MS);
     console.log(`SoloLatino search HTTP status for ${searchQuery}: ${res.status}`);
-    if (!res.ok) return null;
+    if (!res.ok) {
+      if (noteRefusal(res.status, 'search')) hostRefused = true;
+      return null;
+    }
     const $ = cheerio.load(html);
     const results = [];
 
@@ -313,12 +369,20 @@ async function scrape(title, originalTitle, year, type, season, episode, options
 
     const triedClean = new Set([cleanText(title), cleanText(originalTitle)]);
     for (const extraTitle of extraTitles) {
-      if (bestMatch) break;
+      if (bestMatch || hostRefused) break;
       const cleanExtra = cleanText(extraTitle);
       if (!cleanExtra || triedClean.has(cleanExtra)) continue;
       triedClean.add(cleanExtra);
       console.log(`SoloLatino: No match yet, trying alternative title "${extraTitle}"`);
       bestMatch = await performSearch(extraTitle);
+    }
+
+    // Guessing URLs only helps when the search worked and simply did not list the
+    // title. If the host refused the search it will refuse these too — they are the
+    // same origin — and each one costs a probe timeout before saying so.
+    if (!bestMatch && hostRefused) {
+      console.log('SoloLatino: Skipping direct URL fallbacks; the host refused the search');
+      return [];
     }
 
     if (!bestMatch) {
@@ -361,16 +425,16 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     // request's rejection unhandled, and the handshake failure is still the one
     // reported first.
     const csrfRequest = fetchWithTimeout('https://sololatino.net/sanctum/csrf-cookie', {
-      headers: {
-        'User-Agent': userAgent,
-        'Accept': 'application/json'
-      },
+      headers: browserHeaders(userAgent, {
+        'Accept': 'application/json',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin'
+      }),
       signal
     }, API_TIMEOUT_MS);
     const pageRequest = fetchTextWithTimeout(targetPageUrl, {
-      headers: {
-        'User-Agent': userAgent
-      },
+      headers: browserHeaders(userAgent),
       signal
     }, PAGE_TIMEOUT_MS);
 
@@ -381,6 +445,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     const csrfRes = csrfOutcome.value;
     if (!csrfRes.ok) {
       console.warn(`SoloLatino: Sanctum handshake failed with status ${csrfRes.status}`);
+      noteRefusal(csrfRes.status, 'sanctum handshake');
       return [];
     }
 
@@ -408,6 +473,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     const { res: pageRes, text: pageHtml } = pageOutcome.value;
     if (!pageRes.ok) {
       console.warn(`SoloLatino: Failed to fetch target page: ${targetPageUrl} (${pageRes.status})`);
+      noteRefusal(pageRes.status, 'content page');
       return [];
     }
     const pageDoc = cheerio.load(pageHtml);
@@ -513,6 +579,10 @@ module.exports = {
     scoreCandidate,
     extractPageIdentityText,
     pageHasRequestedYear,
-    buildFallbackUrls
+    buildFallbackUrls,
+    browserHeaders,
+    refusalCache,
+    REFUSAL_KEY,
+    REFUSAL_STATUSES
   }
 };
