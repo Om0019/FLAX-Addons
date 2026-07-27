@@ -9,6 +9,15 @@ const pelispedia = require('./pelispedia');
 const { fetchTextWithTimeout, normalizeUrl } = require('../http');
 const { hasBlockedIpLiteralHost } = require('../net-guard');
 const { createTtlCache } = require('../ttl-cache');
+const {
+  bestQuality,
+  claimedQuality,
+  completePlaylistLines,
+  qualityFromManifest,
+  qualityFromUrl,
+  qualityRank,
+  withQualityLabel
+} = require('../quality');
 
 const SCRAPER_TIMEOUT_MS = 10000;
 const SOLOLATINO_TIMEOUT_MS = 12000;
@@ -224,8 +233,18 @@ function getHostFamily(stream) {
   return host || 'unknown';
 }
 
+/**
+ * Host score decides the order; quality only separates streams a host score has
+ * tied. Ranking on quality first would put a host known to fail behind a claim
+ * written in a URL, and the claim is the weaker fact of the two.
+ */
+function compareStreams(a, b) {
+  return (scoreStream(a) - scoreStream(b))
+    || (qualityRank(b.quality) - qualityRank(a.quality));
+}
+
 function sortStreams(streams) {
-  const ranked = [...streams].sort((a, b) => scoreStream(a) - scoreStream(b));
+  const ranked = [...streams].sort(compareStreams);
   const byFamily = new Map();
 
   for (const stream of ranked) {
@@ -234,8 +253,11 @@ function sortStreams(streams) {
     byFamily.get(family).push(stream);
   }
 
+  // Families are ordered by their own best stream, on the same comparison, so a
+  // family that leads with 1080p goes ahead of an equally scored one leading with
+  // 480p instead of on whichever happened to be ranked first.
   const sortedFamilies = [...byFamily.entries()]
-    .sort((a, b) => scoreStream(a[1][0]) - scoreStream(b[1][0]));
+    .sort((a, b) => compareStreams(a[1][0], b[1][0]));
 
   const diversified = [];
   while (sortedFamilies.some(([, familyStreams]) => familyStreams.length > 0)) {
@@ -432,7 +454,18 @@ function sanitizeStream(stream) {
     return null;
   }
 
-  return stream;
+  // Every stream that reaches a viewer passes through here, so this is where the
+  // free reading is taken: whatever the URL and the source's own label claim. A
+  // probe can upgrade it to a measurement later, and a stream that is never probed
+  // still gets to say something.
+  return annotateQuality(stream, claimedQuality(stream));
+}
+
+/** Keeps the better of a stream's existing reading and a new one. */
+function annotateQuality(stream, quality) {
+  const merged = bestQuality(stream.quality, quality);
+  if (!merged || merged === stream.quality) return stream;
+  return { ...stream, quality: merged };
 }
 
 function looksLikePlayableUrl(url) {
@@ -491,14 +524,11 @@ function isCompleteProbeBody(body) {
 
 /**
  * First playlist URI in a master playlist, resolved against the manifest URL.
- * The probe asks for a 2KB range so the body can stop mid-line; the final line is
- * only trusted when the body ended on a newline.
+ * Only complete lines are considered — the probe asks for a byte range, so the
+ * body can stop mid-URI.
  */
 function firstVariantUrl(body, manifestUrl) {
-  const lines = body.split(/\r?\n/);
-  if (!/\r?\n$/.test(body)) lines.pop();
-
-  for (const line of lines) {
+  for (const line of completePlaylistLines(body)) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
     try {
@@ -554,6 +584,16 @@ function isHlsManifestProbe(response, streamUrl) {
   return hasM3u8Path(response.url) || hasM3u8Path(streamUrl);
 }
 
+/**
+ * The outcome of one probe: whether the stream played, and anything the probe
+ * learned about its quality on the way. Returning both keeps the manifest read
+ * free — the body is in hand for the playability checks either way, and fetching
+ * it again later to look at RESOLUTION would double the request count.
+ */
+function verdict(playable, quality = null) {
+  return { playable, quality };
+}
+
 async function isPlayableStream(stream, signal) {
   const startedAt = Date.now();
   const headers = {
@@ -580,7 +620,7 @@ async function isPlayableStream(stream, signal) {
         status: response.status,
         latencyMs: Date.now() - startedAt
       });
-      return false;
+      return verdict(false);
     }
 
     if (!response.ok && response.status !== 206) {
@@ -589,8 +629,12 @@ async function isPlayableStream(stream, signal) {
         status: response.status,
         latencyMs: Date.now() - startedAt
       });
-      return false;
+      return verdict(false);
     }
+
+    // Redirects are followed, and the URL a host lands on often names the rendition
+    // when the one the source handed over did not.
+    const redirectedQuality = qualityFromUrl(response.url);
 
     if (isHlsManifestProbe(response, stream.url)) {
       if (isHtmlResponse(response)) {
@@ -598,7 +642,7 @@ async function isPlayableStream(stream, signal) {
           status: response.status,
           latencyMs: Date.now() - startedAt
         });
-        return false;
+        return verdict(false);
       }
       // #EXTM3U on its own is an empty container, not a stream. turboviplay serves
       // exactly that — `#EXTM3U\n#EXT-X-VERSION:6` and nothing else — for files it
@@ -628,7 +672,7 @@ async function isPlayableStream(stream, signal) {
             status: response.status,
             latencyMs: Date.now() - startedAt
           });
-          return false;
+          return verdict(false);
         }
       }
 
@@ -636,7 +680,10 @@ async function isPlayableStream(stream, signal) {
         status: response.status,
         latencyMs: Date.now() - startedAt
       });
-      return playable;
+      // The variant list is only as complete as the range that was read, which is
+      // what makes a truncated reading a floor rather than a figure.
+      const measured = qualityFromManifest(body, { complete: isCompleteProbeBody(body) });
+      return verdict(playable, bestQuality(measured, redirectedQuality));
     }
 
     if (isHtmlResponse(response) && !looksLikePlayableUrl(response.url || stream.url)) {
@@ -644,7 +691,7 @@ async function isPlayableStream(stream, signal) {
         status: response.status,
         latencyMs: Date.now() - startedAt
       });
-      return false;
+      return verdict(false);
     }
 
     const playable = looksLikePlayableUrl(response.url || stream.url)
@@ -654,24 +701,30 @@ async function isPlayableStream(stream, signal) {
       status: response.status,
       latencyMs: Date.now() - startedAt
     });
-    return playable;
+    // A progressive file carries its dimensions in the container, not in anything a
+    // 2KB range from the front reliably reaches, so this is the URL's word for it.
+    return verdict(playable, redirectedQuality);
   } catch (error) {
     if (error.message.startsWith('Fetch aborted:')) {
-      return false;
+      return verdict(false);
     }
     console.log(`Scraper orchestrator: Filtering stream that failed validation: ${stream.url} (${error.message})`);
     recordHostHealth(stream, error.message.includes('timeout') ? 'timeout' : 'soft-fail', {
       latencyMs: Date.now() - startedAt
     });
-    return false;
+    return verdict(false);
   }
 }
 
 /**
- * Probes streams for playability, at most once per URL. Sharing one of these
- * across the request lets validation start while sources are still reporting and
- * still be counted when the final selection is made — the selection asks for a
+ * Probes streams for playability and quality, at most once per URL. Sharing one of
+ * these across the request lets validation start while sources are still reporting
+ * and still be counted when the final selection is made — the selection asks for a
  * result and gets one that is already in flight, or already settled.
+ *
+ * Caching by URL also shares the verdict between two sources that found the same
+ * link, which is correct for the quality half as well: a rendition ladder belongs
+ * to the URL, not to whoever listed it.
  */
 function createStreamValidator(signal) {
   const byUrl = new Map();
@@ -686,7 +739,7 @@ function createStreamValidator(signal) {
         if (!error.message.startsWith('Fetch aborted:')) {
           recordHostHealth(stream, 'soft-fail');
         }
-        return false;
+        return verdict(false);
       });
 
       byUrl.set(stream.url, probe);
@@ -751,9 +804,11 @@ async function validatePlayableStreams(streams, validator, validationController)
     // Already-settled probes resolve immediately; this is where work done during
     // collection gets picked up rather than repeated.
     validator.validate(stream)
-      .then((playable) => {
+      .then(({ playable, quality }) => {
         if (playable) {
-          playableStreams.push(stream);
+          // The probe read the manifest, so this is the one point where a claim can
+          // be replaced by a measurement.
+          playableStreams.push(annotateQuality(stream, quality));
           if (playableStreams.length >= MIN_CONFIRMED_STREAMS) {
             resolveEnoughConfirmed('enough-confirmed');
           }
@@ -957,7 +1012,10 @@ async function getStreamsUncached(type, id, season, episode) {
     // streams that were actually proven to play. A turboviplay master whose
     // variants no longer resolve scores 1, so it landed at the top of the list
     // and was the first thing a viewer clicked.
-    return validatePlayableStreams(sanitizedStreams, validator, validationController);
+    const selected = await validatePlayableStreams(sanitizedStreams, validator, validationController);
+    // Labeling happens here rather than inside validatePlayableStreams, which has
+    // three ways out: a label written twice reads as "1080p • 1080p".
+    return selected.map(withQualityLabel);
 
   } catch (err) {
     console.error('Error in combined getStreams:', err.message);
@@ -1000,6 +1058,7 @@ module.exports = {
     createStreamValidator,
     startEagerValidation,
     firstVariantUrl,
-    isMasterPlaylist
+    isMasterPlaylist,
+    sortStreams
   }
 };
