@@ -12,7 +12,9 @@ const { __test: cuevanaInternals } = require('./src/scrapers/cuevana3i');
 
 const { stripPkcs7Padding } = unpackerInternals;
 const { sanitizeStream } = orchestratorInternals;
-const { findOptionLabel } = cuevanaInternals;
+const { findOptionLabel, sortWrapperUrls } = cuevanaInternals;
+
+const encodeWrapper = (url) => `https://tungtungsahur.cuevana3i.you/?v=${Buffer.from(url, 'utf8').toString('base64')}`;
 
 function testCacheEviction() {
   const cache = createTtlCache({ maxEntries: 3 });
@@ -150,6 +152,31 @@ function testOptionLabelLookup() {
   assert.strictEqual(findOptionLabel(doc, 'https://absent.example/'), '', 'missing entry yields empty label');
 }
 
+/**
+ * Wrapper selection used to return only `?token=` wrappers whenever one was
+ * present, discarding every `?v=` wrapper on the page, and to cap the `?v=` list
+ * at two when none was. Both kinds are now ranked together — except the TMDB-keyed
+ * aggregators, which assemble the stream in the browser and resolve nothing.
+ */
+function testWrapperSelection() {
+  const goodstream = encodeWrapper('https://goodstream.one/embed-abc.html');
+  const vimeos = encodeWrapper('https://vimeos.net/embed-def.html');
+  const token = 'https://tungtungsahur.cuevana3i.you/?token=1abc';
+
+  const selected = sortWrapperUrls([goodstream, token, vimeos]);
+  assert.strictEqual(selected[0], token, 'token wrappers still rank first');
+  assert.ok(selected.includes(goodstream), 'a ?v= wrapper survives alongside a token wrapper');
+  assert.ok(selected.includes(vimeos), 'the ?v= list is no longer truncated to two');
+
+  for (const aggregator of ['https://vsembed.ru/embed/movie?tmdb=1', 'https://player.videasy.net/movie/1', 'https://vidapi.xyz/embed/movie/1']) {
+    assert.deepStrictEqual(
+      sortWrapperUrls([encodeWrapper(aggregator)]),
+      [],
+      `${aggregator} is dropped rather than given a wrapper slot`
+    );
+  }
+}
+
 function testSanitizeStreamFiltering() {
   assert.strictEqual(sanitizeStream({ url: 'ftp://example.com/a.mp4' }), null, 'non-http protocol dropped');
   assert.strictEqual(sanitizeStream({ url: 'not a url' }), null, 'unparseable url dropped');
@@ -235,6 +262,7 @@ async function main() {
   await testTmdbFailuresAreNotCached();
   testPkcs7PaddingStrip();
   testOptionLabelLookup();
+  testWrapperSelection();
   testSanitizeStreamFiltering();
   await testUpstreamErrorsAreNotDressedAsManifests();
   console.log('Cache and edge-case tests passed');

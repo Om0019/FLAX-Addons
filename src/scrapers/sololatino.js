@@ -138,6 +138,99 @@ function sortPlayerTokens(playerTokens) {
 }
 
 
+const PELISSERIESHOY_ORIGIN = 'https://player.pelisserieshoy.com';
+// The handshake lists every mirror it knows about. Only the first was ever tried,
+// so a dead lead mirror meant the whole player resolved to nothing even though the
+// next entry would have worked. Bounded because each attempt is two round-trips.
+const PELISSERIESHOY_MAX_SERVERS = 4;
+
+function pelisserieshoyHeaders(userAgent, streamUrl) {
+  return {
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'User-Agent': userAgent,
+    'Referer': streamUrl,
+    'Origin': PELISSERIESHOY_ORIGIN
+  };
+}
+
+/**
+ * Turns one entry of the pelisserieshoy server list into a direct URL. The `a=2`
+ * call answers with a path on the player's own origin that 302s to the file.
+ */
+async function resolvePelisserieshoyServer(serverValue, token, userAgent, streamUrl, signal) {
+  const { res: playValRes, data: playValJson } = await fetchJsonWithTimeout(`${PELISSERIESHOY_ORIGIN}/s.php`, {
+    method: 'POST',
+    headers: pelisserieshoyHeaders(userAgent, streamUrl),
+    signal,
+    body: new URLSearchParams({ a: '2', v: serverValue, tok: token })
+  }, API_TIMEOUT_MS);
+
+  if (!playValRes.ok || !playValJson?.u) return null;
+
+  const pathUrl = `${PELISSERIESHOY_ORIGIN}${playValJson.u}`;
+  const redirectCheck = await fetchWithTimeout(pathUrl, {
+    method: 'GET',
+    headers: { 'User-Agent': userAgent, 'Referer': streamUrl },
+    redirect: 'manual',
+    signal
+  }, API_TIMEOUT_MS);
+
+  const directUrl = [301, 302].includes(redirectCheck.status)
+    ? redirectCheck.headers.get('location')
+    : pathUrl;
+  if (!directUrl) return null;
+
+  // A .bin payload is an MP4 with the extension filed off; players route on the
+  // extension, so give them one they act on.
+  return directUrl.includes('.bin') ? `${directUrl}#.mp4` : directUrl;
+}
+
+/**
+ * SoloLatino's own player. It gates the stream behind a three-step token
+ * handshake rather than putting anything extractable in the page.
+ */
+async function resolvePelisserieshoy(streamUrl, userAgent, signal) {
+  const { res: pageRes, text: html } = await fetchTextWithTimeout(streamUrl, {
+    headers: { 'User-Agent': userAgent, 'Referer': 'https://sololatino.net/' },
+    signal
+  }, PAGE_TIMEOUT_MS);
+  if (!pageRes.ok) return null;
+
+  const token = html.match(/const\s+_t\s*=\s*['"]([^'"]+)['"]/)?.[1];
+  if (!token) return null;
+
+  // Register the click the player would have made; the list call is refused without it.
+  await fetchWithTimeout(`${PELISSERIESHOY_ORIGIN}/s.php`, {
+    method: 'POST',
+    headers: pelisserieshoyHeaders(userAgent, streamUrl),
+    signal,
+    body: new URLSearchParams({ a: 'click', tok: token })
+  }, API_TIMEOUT_MS);
+
+  const { res: sListRes, data: sListJson } = await fetchJsonWithTimeout(`${PELISSERIESHOY_ORIGIN}/s.php`, {
+    method: 'POST',
+    headers: pelisserieshoyHeaders(userAgent, streamUrl),
+    signal,
+    body: new URLSearchParams({ a: '1', tok: token })
+  }, API_TIMEOUT_MS);
+
+  if (!sListRes.ok || !Array.isArray(sListJson?.s)) return null;
+
+  for (const entry of sListJson.s.slice(0, PELISSERIESHOY_MAX_SERVERS)) {
+    const serverValue = Array.isArray(entry) ? entry[1] : entry;
+    if (!serverValue) continue;
+
+    try {
+      const directUrl = await resolvePelisserieshoyServer(serverValue, token, userAgent, streamUrl, signal);
+      if (directUrl) return directUrl;
+    } catch (error) {
+      console.warn(`SoloLatino: pelisserieshoy server ${serverValue} failed: ${error.message}`);
+    }
+  }
+
+  return null;
+}
+
 /**
  * SoloLatino Scraper
  */
@@ -339,88 +432,10 @@ async function scrape(title, originalTitle, year, type, season, episode, options
             let directUrl = null;
             if (isIframe) {
               try {
-                // If it is player.pelisserieshoy.com, perform the s.php handshake to fetch direct streams!
-                if (streamUrl.includes('player.pelisserieshoy.com')) {
-                  const { res: pPageRes, text: pHtml } = await fetchTextWithTimeout(streamUrl, {
-                    headers: { 'User-Agent': userAgent, 'Referer': 'https://sololatino.net/' },
-                    signal
-                  }, PAGE_TIMEOUT_MS);
-                  if (pPageRes.ok) {
-                    const tokenMatch = pHtml.match(/const\s+_t\s*=\s*['"]([^'"]+)['"]/);
-                    if (tokenMatch) {
-                      const tToken = tokenMatch[1];
-                      
-                      // 1. Register click
-                      await fetchWithTimeout('https://player.pelisserieshoy.com/s.php', {
-                        method: 'POST',
-                        headers: {
-                          'Content-Type': 'application/x-www-form-urlencoded',
-                          'User-Agent': userAgent,
-                          'Referer': streamUrl,
-                          'Origin': 'https://player.pelisserieshoy.com'
-                        },
-                        signal,
-                        body: new URLSearchParams({ a: 'click', tok: tToken })
-                      }, API_TIMEOUT_MS);
-
-                      // 2. Fetch server list
-                      const { res: sListRes, data: sListJson } = await fetchJsonWithTimeout('https://player.pelisserieshoy.com/s.php', {
-                        method: 'POST',
-                        headers: {
-                          'Content-Type': 'application/x-www-form-urlencoded',
-                          'User-Agent': userAgent,
-                          'Referer': streamUrl,
-                          'Origin': 'https://player.pelisserieshoy.com'
-                        },
-                        signal,
-                        body: new URLSearchParams({ a: '1', tok: tToken })
-                      }, API_TIMEOUT_MS);
-
-                      if (sListRes.ok) {
-                        if (sListJson && sListJson.s && sListJson.s.length > 0) {
-                          // Extract first server
-                          const [sLabel, sVal] = sListJson.s[0];
-                          // 3. Request direct file path
-                          const { res: playValRes, data: playValJson } = await fetchJsonWithTimeout('https://player.pelisserieshoy.com/s.php', {
-                            method: 'POST',
-                            headers: {
-                              'Content-Type': 'application/x-www-form-urlencoded',
-                              'User-Agent': userAgent,
-                              'Referer': streamUrl,
-                              'Origin': 'https://player.pelisserieshoy.com'
-                            },
-                            signal,
-                            body: new URLSearchParams({ a: '2', v: sVal, tok: tToken })
-                          }, API_TIMEOUT_MS);
-
-                          if (playValRes.ok) {
-                            if (playValJson && playValJson.u) {
-                              const pathUrl = 'https://player.pelisserieshoy.com' + playValJson.u;
-                              // 4. Resolve mediafire/direct redirect location header
-                              const redirectCheck = await fetchWithTimeout(pathUrl, {
-                                method: 'GET',
-                                headers: { 'User-Agent': userAgent, 'Referer': streamUrl },
-                                redirect: 'manual',
-                                signal
-                              }, API_TIMEOUT_MS);
-                              if (redirectCheck.status === 302 || redirectCheck.status === 301) {
-                                directUrl = redirectCheck.headers.get('location');
-                              } else {
-                                directUrl = pathUrl;
-                              }
-                              if (directUrl && directUrl.includes('.bin')) {
-                                directUrl += '#.mp4';
-                              }
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                } else {
+                directUrl = streamUrl.includes('player.pelisserieshoy.com')
+                  ? await resolvePelisserieshoy(streamUrl, userAgent, signal)
                   // Standard direct extraction / Dean Edwards unpacker fallback / Embed69 recursive resolution
-                  directUrl = await unpacker.resolvePlayerStream(streamUrl, userAgent, 'https://sololatino.net/', { signal });
-                }
+                  : await unpacker.resolvePlayerStream(streamUrl, userAgent, 'https://sololatino.net/', { signal });
               } catch (e) {
                 console.error(`SoloLatino: Error unpacking iframe ${streamUrl}:`, e.message);
               }

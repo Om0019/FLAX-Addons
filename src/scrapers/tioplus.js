@@ -30,9 +30,10 @@ function scoreServerToken(serverInfo) {
   if (text.includes('mobilefast') || text.includes('vudeo')) return 10;
   if (text.includes('hidefast') || text.includes('ahvsh')) return 11;
   if (text.includes('vidg') || text.includes('listeamed')) return 12;
-  // Filemoon gates playback behind a captcha no server-side resolver can answer
-  // (see resolveFilemoon), so it goes last among the direct players.
-  if (text.includes('filemoon')) return 13;
+  // Filemoon gates playback behind a captcha and VOE behind a DDoS-Guard JS
+  // check; no server-side resolver can answer either, so they go last among the
+  // direct players.
+  if (text.includes('filemoon') || text.includes('voe')) return 13;
   return 6;
 }
 

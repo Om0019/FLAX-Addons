@@ -2,23 +2,62 @@ const assert = require('assert');
 const app = require('./src/server');
 
 const {
+  getUpstreamUserAgent,
   shouldProxyStream,
   isLikelyHlsManifestUrl,
   proxiedStreamUrl,
   rewriteHlsManifest
 } = app.__test;
 
-function fakeReq(baseUrl, referer = '') {
+const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+function fakeReq(baseUrl, referer = '', ua) {
   const parsed = new URL(baseUrl);
   return {
     protocol: parsed.protocol.replace(':', ''),
-    query: { referer },
+    query: { referer, ...(ua ? { ua } : {}) },
     get(name) {
       if (name.toLowerCase() === 'host') return parsed.host;
+      if (name.toLowerCase() === 'user-agent') return 'Stremio/4.4.168';
       return undefined;
     },
     headers: {}
   };
+}
+
+/**
+ * These CDNs answer 403 to anything that is not a browser. Validation probes with
+ * the resolving User-Agent, so forwarding the player's instead meant a stream
+ * passed validation and then 403'd the moment it was played.
+ */
+function testUpstreamUserAgent() {
+  assert.strictEqual(
+    getUpstreamUserAgent(fakeReq('https://addon.example')),
+    DEFAULT_USER_AGENT,
+    'with no pinned UA the proxy uses the browser default, never the client header'
+  );
+
+  assert.strictEqual(
+    getUpstreamUserAgent(fakeReq('https://addon.example', '', 'Scraper UA')),
+    'Scraper UA',
+    'the UA the stream was resolved with is what goes upstream'
+  );
+
+  const pinned = proxiedStreamUrl(
+    'https://addon.example',
+    'https://video.example/master.m3u8',
+    'https://embed.example/player',
+    'Scraper UA'
+  );
+  assert.strictEqual(new URL(pinned).searchParams.get('ua'), 'Scraper UA', 'the resolving UA travels with the link');
+
+  const defaulted = proxiedStreamUrl(
+    'https://addon.example',
+    'https://video.example/master.m3u8',
+    '',
+    DEFAULT_USER_AGENT
+  );
+  assert.strictEqual(new URL(defaulted).searchParams.get('ua'), null, 'the default UA is not spelled out in every URL');
 }
 
 function testProxyDecisions() {
@@ -54,6 +93,13 @@ function testProxyDecisions() {
 function testProxyUrl() {
   assert.strictEqual(isLikelyHlsManifestUrl('https://video.example/master.m3u8?token=abc'), true);
   assert.strictEqual(isLikelyHlsManifestUrl('https://video.example/segment001.ts'), false);
+  // Playlists are buffered whole so they can be rewritten. Matching the query
+  // string too would route a whole movie down that path and hold it in memory.
+  assert.strictEqual(
+    isLikelyHlsManifestUrl('https://video.example/movie.mp4?fallback=master.m3u8'),
+    false,
+    'an m3u8 in the query string does not make an MP4 a playlist'
+  );
 
   const url = proxiedStreamUrl(
     'https://addon.example',
@@ -113,8 +159,29 @@ function testHlsRewrite() {
   assert(rewritten.includes('referer=https%3A%2F%2Fembed.example%2Fplayer'), 'referer is preserved on child proxy URLs');
 }
 
+/** Variants and segments must inherit the UA, or only the master would load. */
+function testHlsRewriteCarriesUserAgent() {
+  const rewritten = rewriteHlsManifest(
+    ['#EXTM3U', '#EXT-X-STREAM-INF:BANDWIDTH=1280000', 'variant/index.m3u8', '#EXTINF:6.000,', 'segment001.ts', ''].join('\n'),
+    'https://origin.example/path/master.m3u8',
+    fakeReq('https://addon.example', 'https://embed.example/player', 'Scraper UA')
+  );
+
+  const uaLinks = rewritten.split('\n').filter((line) => line.includes('/proxy/'));
+  assert.strictEqual(uaLinks.length, 2, 'both the variant and the segment are proxied');
+  for (const link of uaLinks) {
+    assert.strictEqual(
+      new URL(link).searchParams.get('ua'),
+      'Scraper UA',
+      'child requests keep the User-Agent the stream was resolved with'
+    );
+  }
+}
+
 testProxyDecisions();
 testProxyUrl();
+testUpstreamUserAgent();
 testHlsRewrite();
+testHlsRewriteCarriesUserAgent();
 
 console.log('Proxy stream tests passed');

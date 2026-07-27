@@ -36,6 +36,10 @@ const FAST_SOURCE_RELAXED_MIN_SOURCES = 1;
 const STREAM_VALIDATION_TIMEOUT_MS = 2800;
 const STREAM_VALIDATION_TOTAL_TIMEOUT_MS = 3200;
 const STREAM_VALIDATION_FAST_TIMEOUT_MS = 2400;
+// Follow-up probe for one variant of a master playlist. Short on purpose: it only
+// has to catch a host that is refusing or gone, and an inconclusive answer leaves
+// the stream in the candidate list rather than dropping it.
+const HLS_VARIANT_VALIDATION_TIMEOUT_MS = 1500;
 const MIN_CONFIRMED_STREAMS = 3;
 const MAX_VALIDATION_CANDIDATES = 8;
 // Streams are probed as each source reports in, rather than waiting for every
@@ -460,6 +464,59 @@ function hasM3u8Path(url) {
   }
 }
 
+/** A master playlist points at other playlists; a media playlist lists segments. */
+function isMasterPlaylist(body) {
+  return body.includes('#EXT-X-STREAM-INF') && !body.includes('#EXTINF');
+}
+
+/**
+ * First playlist URI in a master playlist, resolved against the manifest URL.
+ * The probe asks for a 2KB range so the body can stop mid-line; the final line is
+ * only trusted when the body ended on a newline.
+ */
+function firstVariantUrl(body, manifestUrl) {
+  const lines = body.split(/\r?\n/);
+  if (!/\r?\n$/.test(body)) lines.pop();
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    try {
+      return new URL(trimmed, manifestUrl).toString();
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Probes one variant of a master playlist. Returns true when it is a playlist,
+ * false when the host gave a definite refusal, and null when the answer is
+ * inconclusive — a timeout says we ran out of budget, not that the stream is bad.
+ */
+async function probeHlsVariant(variantUrl, headers, signal) {
+  try {
+    const { res, text } = await fetchTextWithTimeout(variantUrl, {
+      method: 'GET',
+      headers: { ...headers, Range: 'bytes=0-2047' },
+      redirect: 'follow',
+      signal
+    }, HLS_VARIANT_VALIDATION_TIMEOUT_MS);
+
+    if ([401, 403, 404, 410, 451].includes(res.status)) return false;
+    if (!res.ok && res.status !== 206) return null;
+    if (isHtmlResponse(res)) return false;
+
+    return /#EXTM3U|#EXTINF|#EXT-X-STREAM-INF/.test(text) ? true : null;
+  } catch (error) {
+    // A host that does not resolve at all is a definite answer. A timeout is not.
+    const code = error?.cause?.code || '';
+    return ['ENOTFOUND', 'ERR_INVALID_URL', 'ECONNREFUSED'].includes(code) ? false : null;
+  }
+}
+
 function isHlsManifestProbe(response, streamUrl) {
   const contentType = (response.headers.get('content-type') || '').toLowerCase();
   if (contentType.includes('mpegurl') || contentType.includes('application/vnd.apple')) {
@@ -516,6 +573,28 @@ async function isPlayableStream(stream, signal) {
         return false;
       }
       const playable = body.includes('#EXTM3U') || body.includes('#EXT-X-STREAM-INF') || body.includes('#EXTINF');
+
+      // A master playlist that loads is not yet a stream that plays: it only
+      // names other playlists, and those live on separate hosts that can be gone
+      // while the master is served happily. turboviplay masters return 200 with
+      // variants on hosts that no longer resolve, so the stream was ranked near
+      // the top and then played nothing. Follow one variant before believing it.
+      if (playable && isMasterPlaylist(body)) {
+        const variantUrl = firstVariantUrl(body, response.url || stream.url);
+        const variantVerdict = variantUrl
+          ? await probeHlsVariant(variantUrl, headers, signal)
+          : false;
+
+        if (variantVerdict === false) {
+          console.log(`Scraper orchestrator: Filtering master playlist whose variants are unreachable: ${stream.url}`);
+          recordHostHealth(stream, 'hard-fail', {
+            status: response.status,
+            latencyMs: Date.now() - startedAt
+          });
+          return false;
+        }
+      }
+
       recordHostHealth(stream, playable ? 'success' : 'soft-fail', {
         status: response.status,
         latencyMs: Date.now() - startedAt
@@ -835,8 +914,13 @@ async function getStreamsUncached(type, id, season, episode) {
 
     const directStreams = streams.filter((stream) => Boolean(stream?.url));
     const sanitizedStreams = uniqueStreams(directStreams.map(sanitizeStream).filter(Boolean));
-    const playableStreams = await validatePlayableStreams(sanitizedStreams, validator, validationController);
-    return sortStreams(playableStreams);
+    // Already ordered by validatePlayableStreams: confirmed streams first, each
+    // group ranked by host. Re-sorting here undid that — it ranks purely on host
+    // score, which floats an unproven stream from a well-scored host back above
+    // streams that were actually proven to play. A turboviplay master whose
+    // variants no longer resolve scores 1, so it landed at the top of the list
+    // and was the first thing a viewer clicked.
+    return validatePlayableStreams(sanitizedStreams, validator, validationController);
 
   } catch (err) {
     console.error('Error in combined getStreams:', err.message);
@@ -872,5 +956,13 @@ async function getStreams(type, id, season, episode) {
 
 module.exports = {
   getStreams,
-  __test: { sanitizeStream, streamCache, hostHealth, createStreamValidator, startEagerValidation }
+  __test: {
+    sanitizeStream,
+    streamCache,
+    hostHealth,
+    createStreamValidator,
+    startEagerValidation,
+    firstVariantUrl,
+    isMasterPlaylist
+  }
 };
