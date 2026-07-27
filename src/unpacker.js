@@ -212,6 +212,42 @@ function isXupalaceHost(value) {
   return /(^|\.)xupalace\.org$/i.test(getHostname(value));
 }
 
+function isStreamtapeHost(value) {
+  return /(^|\.)(?:streamtape|streamadblockplus|stape|tapewithadblock|streamta)\.(?:com|net|to|xyz|cc|site)$/i
+    .test(getHostname(value));
+}
+
+/**
+ * Streamtape hides the playback URL from a plain page scan by splitting it in two:
+ * a `#robotlink` div holds the first half, and a script appends the tail of a
+ * second string, dropping its first characters. Neither half is a usable URL on
+ * its own, which is why the generic extractor comes back empty on every
+ * Streamtape page the sources hand over.
+ *
+ * The result is a `/get_video` endpoint that redirects to the media file, so it is
+ * returned as-is and the redirect is followed where it is played.
+ */
+function extractStreamtapeStream(html, baseUrl) {
+  if (!html) return null;
+
+  const assignment = html.match(
+    /getElementById\(\s*['"]robotlink['"]\s*\)\s*\.innerHTML\s*=\s*['"]([^'"]*)['"]\s*\+\s*\(\s*['"]([^'"]*)['"]\s*\)\s*\.substring\(\s*(\d+)\s*\)/i
+  );
+  if (!assignment) return null;
+
+  const [, head, tail, offset] = assignment;
+  const combined = `${head}${tail.substring(Number(offset))}`;
+  if (!combined.includes('get_video')) return null;
+
+  // The head is written as `//host/get_video?...` or as a bare `/get_video?...`,
+  // so the origin has to come from the page it was found on.
+  const absolute = combined.startsWith('//')
+    ? `https:${combined}`
+    : normalizeUrl(combined, baseUrl);
+
+  return absolute && isHttpUrl(absolute) ? absolute : null;
+}
+
 const VIDGUARD_HOST_PATTERN = /(^|\.)(?:vidguard\.to|vid-guard\.com|listeamed\.net|bembed\.net|v6embed\.xyz|vgembed\.com|vgfplay\.com|embedv\.net|fslinks\.org|818ing\.com|moviesm4u\.com)$/i;
 
 function isVidguardHost(value) {
@@ -220,6 +256,42 @@ function isVidguardHost(value) {
 
 function isMediafireHost(value) {
   return /(^|\.)mediafire\.com$/i.test(getHostname(value));
+}
+
+// The Pelisplus single-page player, which is rebranded across a rotating set of
+// domains. This used to be three hardcoded substrings, which missed
+// pelisplus.rpmstream.live — a host the sources hand over regularly and whose
+// stream the decryptor below resolves without any change at all. Recognised by
+// the `pelisplus` subdomain plus the player domains that do not carry it.
+const PELISPLUS_HOST_PATTERN = /(^|\.)(?:pelisplus[a-z0-9-]*\.[a-z0-9.-]+|4meplayer\.pro|upns\.pro|strp2p\.com|rpmstream\.live)$/i;
+
+/**
+ * True for a Pelisplus player URL. The stream id lives in the fragment, and
+ * without one there is nothing to ask the API for.
+ */
+function isPelisplusHost(value) {
+  if (!PELISPLUS_HOST_PATTERN.test(getHostname(value))) return false;
+
+  try {
+    return new URL(value).hash.length > 1;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * vudeo.co serves `/embed-<id>.html` as a fingerprint stub: it assigns the real
+ * player URL to a variable and navigates with `location.replace(variable + suffix)`,
+ * which the literal-argument redirect scan cannot see. The suffix is the
+ * fingerprint result, and `fp=-7` is the value the stub itself falls back to when
+ * fingerprinting times out, so it is accepted.
+ */
+function extractAssignedRedirect(html, baseUrl) {
+  const linkMatch = html.match(/\b(?:var|let|const)\s+redirect_link\s*=\s*['"]([^'"]+)['"]/i);
+  if (!linkMatch) return null;
+
+  const fallbackMatch = html.match(/redirect\(\s*['"]([^'"]+)['"]\s*\)/);
+  return normalizeUrl(`${linkMatch[1]}${fallbackMatch?.[1] || 'fp=-7'}`, baseUrl);
 }
 
 /**
@@ -270,13 +342,16 @@ function scoreXupalaceServer(server) {
   const s = (server || '').toLowerCase();
   if (s.includes('streamwish') || s.includes('hlswish') || s.includes('vidhide')) return 0;
   if (s.includes('dood')) return 2;
-  if (s.includes('voe')) return 4;
   if (s.includes('vidguard') || s.includes('listeamed')) return 4;
   if (s.includes('waaw') || s.includes('netu') || s.includes('hqq')) return 5;
   if (s.includes('lulu') || s.includes('vudeo') || s.includes('ahvsh') || s.includes('streamhide')) return 5;
-  // Filemoon gates playback behind a captcha no server-side resolver can answer
-  // (see resolveFilemoon), so it is tried only once everything else has failed.
-  if (s.includes('filemoon')) return 6;
+  // Gated behind a challenge no server-side resolver can answer — Filemoon by
+  // captcha (see resolveFilemoon), VOE by a DDoS-Guard JS check that answers 403
+  // to every request. Measured over 33 attempts in July 2026, voe.sx resolved
+  // none of them, so ranking it mid-table only displaced hosts that do resolve.
+  // A VOE *mirror* is still recognised by payload further down, which is a
+  // separate path and unaffected by this.
+  if (s.includes('filemoon') || s.includes('voe')) return 6;
   return 3;
 }
 
@@ -1031,8 +1106,8 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
     visited.add(url);
 
     try {
-        // Pelisplus SPA players (upns, 4meplayer, strp2p)
-        if (url.includes('pelisplus.upns.pro') || url.includes('4meplayer.pro') || url.includes('strp2p.com')) {
+        // Pelisplus SPA players (upns, 4meplayer, strp2p, rpmstream)
+        if (isPelisplusHost(url)) {
             const m3u8 = await resolvePelisplus(url, userAgent, referer, signal);
             if (m3u8) return m3u8;
         }
@@ -1094,6 +1169,11 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
             if (nuploadDirectUrl) return nuploadDirectUrl;
         }
 
+        if (isStreamtapeHost(url)) {
+            const streamtapeDirectUrl = extractStreamtapeStream(html, url);
+            if (streamtapeDirectUrl) return streamtapeDirectUrl;
+        }
+
         // emturbovid / turbovidhls: extract m3u8 from data-hash attribute or urlPlay variable
         if (url.includes('emturbovid') || url.includes('turbovidhls') || url.includes('turboviplay')) {
             const dataHash = html.match(/data-hash=["']([^"']+\.m3u8[^"']*)/);
@@ -1117,15 +1197,15 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
                         if (server === 'vidhide' || server === 'streamwish' || server === 'hlswish') return 0;
                         if (server === 'rapidvideo') return 1;
                         if (server === 'dood' || server === 'doodstream' || server === 'doodstreaming') return 3;
-                        if (server === 'voe') return 5;
                         if (server === 'vidguard' || server === 'listeamed') return 5;
                         if (server === 'luluvdo' || server === 'vudeo' || server === 'streamhide') return 6;
                         if (server === 'netu' || server === 'waaw' || server === 'hqq') return 7;
-                        // Filemoon gates playback behind a captcha no server-side
-                        // resolver can answer (see resolveFilemoon). It ranked 2nd
-                        // here, so it burned one of MAX_EMBED69_ATTEMPTS on every
+                        // Filemoon gates playback behind a captcha and VOE behind a
+                        // DDoS-Guard JS check; neither can be answered server-side
+                        // (see resolveFilemoon and scoreXupalaceServer). Ranked
+                        // above, each burned one of MAX_EMBED69_ATTEMPTS on every
                         // page that listed it.
-                        if (server === 'filemoon') return 8;
+                        if (server === 'filemoon' || server === 'voe') return 8;
                         return 2;
                     };
                     return kindScore(a) - kindScore(b) || serverScore(a) - serverScore(b);
@@ -1165,6 +1245,15 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
             console.log(`Unpacker: Following JS redirect to ${redirectUrl}`);
             const redirectDirectUrl = await resolvePlayerStream(redirectUrl, userAgent, referer, { depth: depth + 1, visited, signal });
             if (redirectDirectUrl) return redirectDirectUrl;
+        }
+
+        // Redirects built by concatenating a variable, which the literal scan above
+        // cannot match (vudeo's fingerprint stub, for one).
+        const assignedRedirectUrl = extractAssignedRedirect(html, url);
+        if (assignedRedirectUrl && assignedRedirectUrl !== url && isHttpUrl(assignedRedirectUrl)) {
+            console.log(`Unpacker: Following assigned redirect to ${assignedRedirectUrl}`);
+            const assignedDirectUrl = await resolvePlayerStream(assignedRedirectUrl, userAgent, referer, { depth: depth + 1, visited, signal });
+            if (assignedDirectUrl) return assignedDirectUrl;
         }
 
         const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
@@ -1217,9 +1306,13 @@ module.exports = {
   __test: {
     decodeVidguardSignature,
     decryptFilemoonPayload,
+    extractAssignedRedirect,
     extractMediafireDirectUrl,
+    extractStreamtapeStream,
     extractVidguardStream,
     extractVoeDirectStream,
+    isPelisplusHost,
+    isStreamtapeHost,
     isSupportedEmbedServer,
     iterUnpackedScripts,
     normalizeEmbedUrl,

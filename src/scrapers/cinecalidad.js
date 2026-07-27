@@ -122,11 +122,11 @@ function scorePlayerOption(option) {
   if (text.includes('vimeos')) return 0;
   if (text.includes('goodstream')) return 1;
   if (text.includes('hlswish') || text.includes('streamwish')) return 2;
-  if (text.includes('voe')) return 9;
   if (text.includes('waaw')) return 10;
-  // Filemoon gates playback behind a captcha no server-side resolver can answer
-  // (see resolveFilemoon), so it is tried only once everything else has failed.
-  if (text.includes('filemoon')) return 11;
+  // Filemoon gates playback behind a captcha and VOE behind a DDoS-Guard JS
+  // check; no server-side resolver can answer either, so they are tried only
+  // once everything else has failed.
+  if (text.includes('filemoon') || text.includes('voe')) return 11;
   return 5;
 }
 

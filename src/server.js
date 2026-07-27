@@ -151,19 +151,37 @@ async function fetchFollowingRedirects(startUrl, options) {
   }
 }
 
-function proxiedStreamUrl(baseUrl, targetUrl, referer) {
+/**
+ * `userAgent` is the one the scraper resolved and validated the stream with, and
+ * it travels with the link so playback repeats the request that was proven to
+ * work. Omitted from the URL when it is the default, which is what the proxy
+ * falls back to anyway.
+ */
+function proxiedStreamUrl(baseUrl, targetUrl, referer, userAgent) {
   const filename = getProxyFilename(targetUrl);
-  return `${baseUrl}/proxy/${filename}?url=${encodeURIComponent(targetUrl)}&referer=${encodeURIComponent(referer || '')}`;
+  const query = `url=${encodeURIComponent(targetUrl)}&referer=${encodeURIComponent(referer || '')}`;
+  const userAgentQuery = userAgent && userAgent !== DEFAULT_USER_AGENT
+    ? `&ua=${encodeURIComponent(userAgent)}`
+    : '';
+
+  return `${baseUrl}/proxy/${filename}?${query}${userAgentQuery}`;
+}
+
+/** The upstream User-Agent for a proxy request: the resolving one, never the client's. */
+function getUpstreamUserAgent(req) {
+  const ua = req.query.ua;
+  return typeof ua === 'string' && ua ? ua : DEFAULT_USER_AGENT;
 }
 
 function rewriteHlsManifest(manifestText, targetUrl, req) {
   const baseUrl = getPublicBaseUrl(req);
   const referer = req.query.referer || targetUrl;
+  const userAgent = getUpstreamUserAgent(req);
 
   const rewriteUri = (uri) => {
     if (!uri || uri.startsWith('data:')) return uri;
     const absoluteUrl = new URL(uri, targetUrl).toString();
-    return proxiedStreamUrl(baseUrl, absoluteUrl, referer);
+    return proxiedStreamUrl(baseUrl, absoluteUrl, referer, userAgent);
   };
 
   return manifestText
@@ -181,10 +199,15 @@ function rewriteHlsManifest(manifestText, targetUrl, req) {
     .join('\n');
 }
 
+/**
+ * Deliberately the pathname alone. Including the query string means a segment or
+ * an MP4 carrying an unrelated `.m3u8` parameter — a fallback URL, a referrer —
+ * is treated as a playlist, and playlists are buffered whole before being
+ * rewritten. That turns a multi-gigabyte video into a single in-memory string.
+ */
 function isLikelyHlsManifestUrl(url) {
   try {
-    const parsed = new URL(url);
-    return /\.m3u8(?:$|[?#])/i.test(parsed.pathname + parsed.search);
+    return /\.m3u8$/i.test(new URL(url).pathname);
   } catch {
     return false;
   }
@@ -199,7 +222,12 @@ function wrapProxyStreams(streams, req) {
     }
 
     const requestHeaders = stream?.behaviorHints?.proxyHeaders?.request || {};
-    const proxiedUrl = proxiedStreamUrl(baseUrl, stream.url, requestHeaders.Referer || '');
+    const proxiedUrl = proxiedStreamUrl(
+      baseUrl,
+      stream.url,
+      requestHeaders.Referer || '',
+      requestHeaders['User-Agent']
+    );
 
     return {
       ...stream,
@@ -230,8 +258,12 @@ app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
   }
 
   try {
+    // Never the client's User-Agent. Several of these CDNs (vimeos, goodstream,
+    // premilkyway) answer 403 to anything that is not a browser, so forwarding
+    // what the player sent meant a stream that passed validation — which probes
+    // with the resolving User-Agent — then failed the moment Stremio played it.
     const headers = {
-      'User-Agent': req.get('user-agent') || DEFAULT_USER_AGENT,
+      'User-Agent': getUpstreamUserAgent(req),
       'Referer': referer
     };
 
@@ -795,6 +827,7 @@ app.get('/', (req, res) => {
 
 app.__test = {
   fetchFollowingRedirects,
+  getUpstreamUserAgent,
   shouldProxyStream,
   getProxyFilename,
   isLikelyHlsManifestUrl,

@@ -137,6 +137,13 @@ async function testUnprovenStreamsSurviveTheEarlyExit() {
       goodUrls.length + 1,
       'every collected stream that was not disproven is offered'
     );
+    // Kept, but behind the proven ones. A final sort on host score alone used to
+    // float unproven streams back to the top, which is where viewers click first.
+    assert.strictEqual(
+      urls[urls.length - 1],
+      slowUrl,
+      'an unproven stream is offered after every confirmed one'
+    );
   } finally {
     server.close();
   }
@@ -252,13 +259,95 @@ async function testM3u8InQueryStringIsNotTreatedAsManifest() {
   }
 }
 
+/**
+ * A master playlist that loads is not yet a stream that plays. turboviplay serves
+ * masters happily while the variant hosts they name are gone, so the stream ranked
+ * near the top of the list and then played nothing.
+ */
+async function testMasterPlaylistWithDeadVariantIsRejected() {
+  const server = http.createServer((req, res) => {
+    if (req.url.startsWith('/dead-variant/')) {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('gone');
+      return;
+    }
+    if (req.url.startsWith('/live-variant/')) {
+      res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' });
+      res.end('#EXTM3U\n#EXTINF:6.000,\nsegment001.ts\n');
+      return;
+    }
+
+    const variant = req.url.includes('dead') ? '/dead-variant/index.m3u8' : '/live-variant/index.m3u8';
+    res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' });
+    res.end(`#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1280000,RESOLUTION=1280x720\n${variant}\n`);
+  });
+  await new Promise((resolve) => server.listen(0, resolve));
+
+  try {
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const deadMaster = `${origin}/dead/master.m3u8`;
+    const liveMaster = `${origin}/live/master.m3u8`;
+
+    const orchestrator = loadOrchestratorWith({
+      LaMovie: stubScraper('LaMovie', [deadMaster]),
+      Cuevana3i: stubScraper('Cuevana3i', [liveMaster])
+    });
+
+    const streams = await orchestrator.getStreams('movie', 'tmdb:movie:6', null, null);
+    assert.deepStrictEqual(
+      streams.map((stream) => stream.url),
+      [liveMaster],
+      'the master whose variant 404s is dropped; the one whose variant loads is kept'
+    );
+  } finally {
+    server.close();
+  }
+}
+
+/**
+ * The deeper probe must not invent failures: a variant that is merely slow leaves
+ * the stream unproven rather than rejected, which is what keeps it in the list.
+ */
+async function testSlowVariantDoesNotRejectTheMaster() {
+  const stalled = [];
+  const server = http.createServer((req, res) => {
+    // Never answered: the variant probe has to give up on its own deadline.
+    if (req.url.startsWith('/slow-variant/')) {
+      stalled.push(res);
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' });
+    res.end('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1280000\n/slow-variant/index.m3u8\n');
+  });
+  await new Promise((resolve) => server.listen(0, resolve));
+
+  try {
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const master = `${origin}/master.m3u8`;
+
+    const orchestrator = loadOrchestratorWith({ LaMovie: stubScraper('LaMovie', [master]) });
+    const streams = await orchestrator.getStreams('movie', 'tmdb:movie:7', null, null);
+
+    assert.deepStrictEqual(
+      streams.map((stream) => stream.url),
+      [master],
+      'a variant that times out is inconclusive, so the master survives'
+    );
+  } finally {
+    stalled.forEach((res) => res.destroy());
+    server.close();
+  }
+}
+
 async function run() {
   const tests = [
     ['Unproven streams survive the early exit', testUnprovenStreamsSurviveTheEarlyExit],
     ['Failed streams are still dropped', testFailedStreamsAreStillDropped],
     ['Total validation failure falls back to candidates', testAllFailedFallsBackToCandidates],
     ['Extensionless manifest is playable', testExtensionlessManifestIsPlayable],
-    ['m3u8 in a query string is not a manifest', testM3u8InQueryStringIsNotTreatedAsManifest]
+    ['m3u8 in a query string is not a manifest', testM3u8InQueryStringIsNotTreatedAsManifest],
+    ['Master playlist with a dead variant is rejected', testMasterPlaylistWithDeadVariantIsRejected],
+    ['Slow variant does not reject the master', testSlowVariantDoesNotRejectTheMaster]
   ];
 
   for (const [label, test] of tests) {

@@ -6,6 +6,10 @@ const PLAYER_CONCURRENCY = 5;
 const PLAYER_RESOLVE_TIMEOUT_MS = 1800;
 const PAGE_TIMEOUT_MS = 5000;
 const PROBE_TIMEOUT_MS = 2500;
+// Every wrapper costs at least one fetch, and pages list far more of them than are
+// worth trying. Bounded rather than filtered by kind, so the ranking decides which
+// ones make the cut.
+const MAX_WRAPPERS = 6;
 
 
 function slugifyTitle(str, options = {}) {
@@ -93,15 +97,40 @@ function isTokenWrapper(wrapperUrl) {
   }
 }
 
+/**
+ * Ranks every wrapper on the page instead of choosing one kind of them.
+ *
+ * The `?token=` wrappers decode to a known set of hosts and are the better bet, so
+ * they still come first — but returning *only* those threw away every `?v=`
+ * wrapper whenever a single token wrapper was present, and the `?v=` list was
+ * separately truncated to two. Both are just base64 around an embed URL, and a
+ * page usually carries a mix, so a working host was regularly discarded in favour
+ * of a token wrapper pointing at a dead one.
+ */
 function sortWrapperUrls(wrapperUrls) {
-  const tokenWrappers = wrapperUrls.filter(isTokenWrapper);
-  const otherWrappers = wrapperUrls.filter((url) => !isTokenWrapper(url));
+  const usable = wrapperUrls.filter((url) => !isAggregatorWrapper(url));
+  const byScore = (a, b) => scoreDecodedWrapper(a) - scoreDecodedWrapper(b);
+  const tokenWrappers = usable.filter(isTokenWrapper).sort(byScore);
+  const otherWrappers = usable.filter((url) => !isTokenWrapper(url)).sort(byScore);
 
-  if (tokenWrappers.length > 0) {
-    return [...tokenWrappers].sort((a, b) => scoreDecodedWrapper(a) - scoreDecodedWrapper(b));
+  return [...tokenWrappers, ...otherWrappers].slice(0, MAX_WRAPPERS);
+}
+
+// Third-party players keyed by TMDB id rather than by a file: they answer 200 with
+// a single-page app and assemble the stream in the browser, so there is nothing on
+// the page to extract. Measured across 18 titles they resolved 0 of 35 attempts,
+// and each one costs a fetch and a resolve timeout, so they are dropped rather
+// than merely ranked low — otherwise they crowd out wrappers that do resolve.
+const AGGREGATOR_HOST_PATTERN = /(^|\.)(?:vsembed\.[a-z]+|videasy\.[a-z]+|vidapi\.xyz|vidlink\.pro|vidsrc\.[a-z]+)$/i;
+
+function isAggregatorWrapper(wrapperUrl) {
+  const decodedUrl = decodeWrapperUrl(wrapperUrl) || wrapperUrl;
+
+  try {
+    return AGGREGATOR_HOST_PATTERN.test(new URL(decodedUrl).hostname);
+  } catch {
+    return false;
   }
-
-  return otherWrappers.slice(0, 2);
 }
 
 function scoreDecodedWrapper(wrapperUrl) {
@@ -116,7 +145,6 @@ function scoreDecodedWrapper(wrapperUrl) {
 
   if (host.includes('tiktokshopping.xyz')) return 0;
   if (host.includes('dood')) return 8;
-  if (host.includes('vidlink.pro') || host.includes('vidapi.xyz') || host.includes('videasy') || host.includes('vsembed')) return 9;
   // Filemoon gates playback behind a captcha no server-side resolver can answer
   // (see resolveFilemoon), so it is tried only once everything else has failed.
   if (host.includes('filemoon')) return 10;
@@ -257,5 +285,5 @@ async function scrape(title, originalTitle, year, type, season, episode, options
 
 module.exports = {
   scrape,
-  __test: { findOptionLabel }
+  __test: { findOptionLabel, isAggregatorWrapper, sortWrapperUrls }
 };

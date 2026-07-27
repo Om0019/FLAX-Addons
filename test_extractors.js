@@ -10,9 +10,13 @@ const { extractDirectStream, resolvePlayerStream, resolveDownloadUrl, __test } =
 const {
   decodeVidguardSignature,
   decryptFilemoonPayload,
+  extractAssignedRedirect,
   extractMediafireDirectUrl,
+  extractStreamtapeStream,
   extractVidguardStream,
   extractVoeDirectStream,
+  isPelisplusHost,
+  isStreamtapeHost,
   isSupportedEmbedServer,
   iterUnpackedScripts,
   normalizeEmbedUrl
@@ -465,14 +469,86 @@ async function testEmbed69RanksFilemoonLast() {
       page.close();
     }
 
+    assert.strictEqual(
+      requested[0],
+      '/vidhide',
+      'the server that can actually resolve is attempted first'
+    );
     assert.deepStrictEqual(
-      requested,
-      ['/vidhide', '/voe', '/filemoon'],
-      'filemoon is attempted only after the servers that can actually resolve'
+      [...requested].slice(1).sort(),
+      ['/filemoon', '/voe'],
+      'both challenge-gated hosts are attempted only once the resolvable ones are exhausted'
     );
   } finally {
     server.close();
   }
+}
+
+/**
+ * Streamtape splits the playback URL across a div and a script that appends the
+ * tail of a second string. Neither half is a URL, which is why a plain page scan
+ * never found one.
+ */
+function testStreamtapeExtraction() {
+  const head = '//streamtape.com/get_video?id=abc123&expires=1799999999&ip=Nzc';
+  const tail = 'XYZ&token=deadbeefcafe';
+  const html = `
+    <div id="robotlink" style="display:none;">${head}</div>
+    <script>document.getElementById('robotlink').innerHTML = '${head}' + ('${tail}').substring(3);</script>
+  `;
+
+  assert.strictEqual(
+    extractStreamtapeStream(html, 'https://streamtape.com/e/abc123'),
+    `https:${head}&token=deadbeefcafe`,
+    'the two halves are joined with the leading characters of the tail dropped'
+  );
+
+  assert.strictEqual(
+    extractStreamtapeStream('<div id="robotlink"></div>', 'https://streamtape.com/e/abc123'),
+    null,
+    'a page without the split assignment yields nothing rather than a broken URL'
+  );
+
+  assert.strictEqual(isStreamtapeHost('https://streamtape.com/e/abc'), true);
+  assert.strictEqual(isStreamtapeHost('https://tapewithadblock.org/e/abc'), false, 'unrelated hosts are not claimed');
+}
+
+/**
+ * vudeo's fingerprint stub navigates with `location.replace(variable + suffix)`,
+ * which carries no literal URL for the redirect scan to match.
+ */
+function testAssignedRedirectExtraction() {
+  const html = `
+    <script>
+    var redirect_link = 'http://vudeo.co/embed-a6fxzqiiyuj3.html?tr_uuid=20260727-1739&';
+    const rdrTimeout = setTimeout(() => redirect('fp=-7'), 300);
+    </script>
+  `;
+
+  assert.strictEqual(
+    extractAssignedRedirect(html, 'https://vudeo.co/embed-a6fxzqiiyuj3.html'),
+    'http://vudeo.co/embed-a6fxzqiiyuj3.html?tr_uuid=20260727-1739&fp=-7',
+    'the assigned base and the fallback suffix are joined'
+  );
+
+  assert.strictEqual(
+    extractAssignedRedirect('<script>var other = "https://example.test/";</script>', 'https://vudeo.co/'),
+    null,
+    'an unrelated assignment is not treated as a redirect'
+  );
+}
+
+/** pelisplus.rpmstream.live resolved with the existing decryptor but was never routed to it. */
+function testPelisplusHostRecognition() {
+  assert.strictEqual(isPelisplusHost('https://pelisplus.rpmstream.live/#ogfd1'), true);
+  assert.strictEqual(isPelisplusHost('https://pelisplus.upns.pro/#abc'), true);
+  assert.strictEqual(isPelisplusHost('https://pelisplusto.4meplayer.pro/#abc'), true);
+  assert.strictEqual(
+    isPelisplusHost('https://pelisplus.rpmstream.live/'),
+    false,
+    'without a fragment there is no video id to ask the API for'
+  );
+  assert.strictEqual(isPelisplusHost('https://goodstream.one/embed-abc.html'), false);
 }
 
 async function run() {
@@ -490,7 +566,10 @@ async function run() {
     ['Packed stream ad filter', testPackedStreamAdFilter],
     ['Dead JS redirect falls through', testDeadJsRedirectFallsThrough],
     ['Filemoon payload decryption', testFilemoonPayloadDecryption],
-    ['embed69 ranks Filemoon last', testEmbed69RanksFilemoonLast]
+    ['embed69 ranks challenge-gated hosts last', testEmbed69RanksFilemoonLast],
+    ['Streamtape split URL extraction', testStreamtapeExtraction],
+    ['Assigned-variable redirect extraction', testAssignedRedirectExtraction],
+    ['Pelisplus host recognition', testPelisplusHostRecognition]
   ];
 
   for (const [label, test] of tests) {
