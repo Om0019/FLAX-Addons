@@ -4,10 +4,11 @@ const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const scrapers = require('./scrapers');
 const { fetchTextWithTimeout, fetchWithTimeout } = require('./http');
-const { BlockedAddressError, MAX_REDIRECT_HOPS, assertPublicUrl } = require('./net-guard');
+const { BlockedAddressError, MAX_REDIRECT_HOPS, UnresolvableHostError, assertPublicUrl } = require('./net-guard');
 
 const app = express();
 const PROXY_FETCH_TIMEOUT_MS = 8000;
+const DEFAULT_REFERER = 'https://sololatino.net/';
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 // Enable CORS for Stremio client compatibility
@@ -37,9 +38,27 @@ const manifest = {
   catalogs: []
 };
 
+/**
+ * X-Forwarded-Proto is a list, not a value: every proxy in the chain appends to
+ * it, so a deployment behind two of them sends "https, http". Pasting the whole
+ * header in front of :// built a base URL of "https, http://host", and since every
+ * URI in a rewritten HLS manifest is built on that base, nothing proxied played at
+ * all. Only the first hop describes the scheme the client actually used, and
+ * anything that is not http or https is not a scheme we are willing to emit.
+ */
+function getForwardedProtocol(req) {
+  const header = req.headers['x-forwarded-proto'];
+  const first = String(Array.isArray(header) ? header[0] : header || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+
+  return /^https?$/.test(first) ? first : null;
+}
+
 function getPublicBaseUrl(req) {
   const host = req.get('host');
-  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+  const protocol = getForwardedProtocol(req) || req.protocol;
   return `${protocol}://${host}`;
 }
 
@@ -173,9 +192,22 @@ function getUpstreamUserAgent(req) {
   return typeof ua === 'string' && ua ? ua : DEFAULT_USER_AGENT;
 }
 
+/**
+ * The upstream Referer for a proxy request. Read in one place because the route
+ * and the manifest rewriter both need it and used to disagree: with no referer on
+ * the link the route sent DEFAULT_REFERER while the rewriter wrote the manifest's
+ * own URL onto every child link. Header-sensitive CDNs are the only reason a
+ * stream is proxied at all, so that had the playlist load and then every segment
+ * arrive with a Referer the playlist never used.
+ */
+function getUpstreamReferer(req) {
+  const referer = req.query.referer;
+  return typeof referer === 'string' && referer ? referer : DEFAULT_REFERER;
+}
+
 function rewriteHlsManifest(manifestText, targetUrl, req) {
   const baseUrl = getPublicBaseUrl(req);
-  const referer = req.query.referer || targetUrl;
+  const referer = getUpstreamReferer(req);
   const userAgent = getUpstreamUserAgent(req);
 
   const rewriteUri = (uri) => {
@@ -251,7 +283,7 @@ app.get('/manifest.json', (req, res) => {
 
 app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
   const targetUrl = req.query.url;
-  const referer = req.query.referer || 'https://sololatino.net/';
+  const referer = getUpstreamReferer(req);
 
   if (!targetUrl || typeof targetUrl !== 'string') {
     return res.status(400).send('Missing url');
@@ -334,6 +366,16 @@ app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
     if (error instanceof TooManyRedirectsError) {
       console.warn('Proxy Stream Error:', error.message);
       if (!res.headersSent) return res.status(502).send('Too many redirects');
+      res.destroy();
+      return;
+    }
+
+    // Checked before BlockedAddressError, which it extends. A host that does not
+    // resolve is the upstream being gone, not a URL we refused, and answering 400
+    // told a player its request was malformed when the CDN had simply died.
+    if (error instanceof UnresolvableHostError) {
+      console.warn('Proxy Stream Error:', error.message);
+      if (!res.headersSent) return res.status(502).send('Upstream host did not resolve');
       res.destroy();
       return;
     }
@@ -832,7 +874,7 @@ function renderLandingPage(protocol, host) {
 // 3. Landing / Dashboard Page Route
 app.get('/', (req, res) => {
   const host = req.get('host');
-  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+  const protocol = getForwardedProtocol(req) || req.protocol;
   const origin = `${protocol}://${host}`;
 
   let page = landingPageByOrigin.get(origin);
@@ -849,6 +891,7 @@ app.get('/', (req, res) => {
 
 app.__test = {
   fetchFollowingRedirects,
+  getPublicBaseUrl,
   getUpstreamUserAgent,
   shouldProxyStream,
   getProxyFilename,

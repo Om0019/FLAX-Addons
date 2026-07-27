@@ -184,8 +184,17 @@ function getHostname(value) {
   }
 }
 
+// DoodStream rebranded to playmogo.com: every mirror below — the dood.* names, the
+// zero-spelled ones and the ds2*/doply aliases — now answers 301 to
+// playmogo.com/e/<code>, path preserved. Recognising only the old dood.* set meant a
+// source handing over d000d.com or playmogo.com directly was never routed here at
+// all. See resolveDood for what playmogo currently serves.
 function isDoodHost(value) {
-  return /(^|\.)dood\.(?:li|to|stream|watch|so|pm|ws)$/i.test(getHostname(value));
+  const host = getHostname(value);
+  return /(^|\.)dood\.(?:li|to|stream|watch|so|pm|ws|re|yt|video)$/i.test(host)
+    || /(^|\.)(?:d0{2,4}d|d0o0d|dooood|all3do|doply|vide0)\.(?:com|net|to)$/i.test(host)
+    || /(^|\.)(?:doodstream|ds2play|ds2video)\.(?:com|co|net)$/i.test(host)
+    || /(^|\.)playmogo\.com$/i.test(host);
 }
 
 function isFilemoonHost(value) {
@@ -347,17 +356,20 @@ function isFileLockerServer(server) {
 function scoreXupalaceServer(server) {
   const s = (server || '').toLowerCase();
   if (s.includes('streamwish') || s.includes('hlswish') || s.includes('vidhide')) return 0;
-  if (s.includes('dood')) return 2;
   if (s.includes('vidguard') || s.includes('listeamed')) return 4;
   if (s.includes('waaw') || s.includes('netu') || s.includes('hqq')) return 5;
   if (s.includes('lulu') || s.includes('vudeo') || s.includes('ahvsh') || s.includes('streamhide')) return 5;
   // Gated behind a challenge no server-side resolver can answer — Filemoon by
   // captcha (see resolveFilemoon), VOE by a DDoS-Guard JS check that answers 403
-  // to every request. Measured over 33 attempts in July 2026, voe.sx resolved
-  // none of them, so ranking it mid-table only displaced hosts that do resolve.
+  // to every request, Dood by the Cloudflare managed challenge playmogo.com now
+  // serves every embed page behind (see resolveDood). Measured over 33 attempts in
+  // July 2026, voe.sx resolved none of them, so ranking it mid-table only displaced
+  // hosts that do resolve. Dood was ranked third best here and had the same effect:
+  // every page listing it spent a fetch and a resolve timeout on a challenge page
+  // ahead of servers that hand over a stream.
   // A VOE *mirror* is still recognised by payload further down, which is a
   // separate path and unaffected by this.
-  if (s.includes('filemoon') || s.includes('voe')) return 6;
+  if (s.includes('filemoon') || s.includes('voe') || s.includes('dood') || s.includes('playmogo')) return 6;
   return 3;
 }
 
@@ -892,19 +904,37 @@ function decryptEmbed69(html) {
   return decryptedLinks;
 }
 
-async function resolveDood(html, url, userAgent, signal) {
-  if (!isDoodHost(url)) return null;
+/**
+ * Dood's `/pass_md5/` handshake, run against whichever page the embed landed on.
+ *
+ * `pageUrl` is the URL the body was actually served from, which after the playmogo
+ * rebrand is never the URL we asked for: a relative /pass_md5/ resolved against the
+ * link we started from pointed at a host that only redirects.
+ *
+ * Checked against live links in July 2026 (real dood embeds taken off a Cuevana3i
+ * page): every mirror 301s to playmogo.com, which answers 403 with a Cloudflare
+ * managed challenge — `cf-mitigated: challenge`, the "Just a moment..." interstitial
+ * — and no pass_md5 in the body, so this returns null before spending a request.
+ * The other Cloudflare-fronted sources this addon scrapes answered 200 from the same
+ * address at the same time, so that is playmogo's policy for embed pages rather than
+ * a reputation problem at one address. The handshake is kept rather than deleted
+ * because it is a page-shape check that costs nothing when the shape is absent, and
+ * it is what will pick the host back up if the challenge is ever lifted. What this
+ * finding does change is the ranking: see scoreXupalaceServer.
+ */
+async function resolveDood(html, url, userAgent, signal, pageUrl = url) {
+  if (!isDoodHost(url) && !isDoodHost(pageUrl)) return null;
 
   const passMatch = html.match(/(["'])(\/pass_md5\/[^"'<>]+)\1/i)
     || html.match(/(["'])(https?:\/\/[^"'<>]+\/pass_md5\/[^"'<>]+)\1/i);
-  const passUrl = normalizeUrl(passMatch?.[2], url);
+  const passUrl = normalizeUrl(passMatch?.[2], pageUrl);
   if (!passUrl) return null;
 
   try {
     const { res, text } = await fetchTextWithTimeout(passUrl, {
       headers: {
         'User-Agent': userAgent,
-        'Referer': url,
+        'Referer': pageUrl,
         'X-Requested-With': 'XMLHttpRequest'
       },
       signal
@@ -1186,7 +1216,7 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
             if (urlPlay) return normalizeUrl(urlPlay[1], url);
         }
 
-        const doodDirectUrl = await resolveDood(html, url, userAgent, signal);
+        const doodDirectUrl = await resolveDood(html, url, userAgent, signal, res.url || url);
         if (doodDirectUrl) return doodDirectUrl;
 
         // Check if it's embed69, including mirrored /vidurl pages that serve Embed69 HTML.
@@ -1200,16 +1230,24 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
                         const server = (value.server || '').toLowerCase();
                         if (server === 'vidhide' || server === 'streamwish' || server === 'hlswish') return 0;
                         if (server === 'rapidvideo') return 1;
-                        if (server === 'dood' || server === 'doodstream' || server === 'doodstreaming') return 3;
                         if (server === 'vidguard' || server === 'listeamed') return 5;
                         if (server === 'luluvdo' || server === 'vudeo' || server === 'streamhide') return 6;
                         if (server === 'netu' || server === 'waaw' || server === 'hqq') return 7;
-                        // Filemoon gates playback behind a captcha and VOE behind a
-                        // DDoS-Guard JS check; neither can be answered server-side
-                        // (see resolveFilemoon and scoreXupalaceServer). Ranked
-                        // above, each burned one of MAX_EMBED69_ATTEMPTS on every
-                        // page that listed it.
-                        if (server === 'filemoon' || server === 'voe') return 8;
+                        // Filemoon gates playback behind a captcha, VOE behind a
+                        // DDoS-Guard JS check, and Dood behind the Cloudflare managed
+                        // challenge playmogo.com serves every embed page behind; none
+                        // can be answered server-side (see resolveFilemoon,
+                        // resolveDood and scoreXupalaceServer). Ranked above, each
+                        // burned one of MAX_EMBED69_ATTEMPTS on every page that
+                        // listed it — Dood at 3 was ahead of four hosts that resolve.
+                        if (
+                          server === 'filemoon'
+                          || server === 'voe'
+                          || server === 'dood'
+                          || server === 'doodstream'
+                          || server === 'doodstreaming'
+                          || server === 'playmogo'
+                        ) return 8;
                         return 2;
                     };
                     return kindScore(a) - kindScore(b) || serverScore(a) - serverScore(b);
@@ -1312,6 +1350,7 @@ async function resolveDownloadUrl(url, userAgent, referer, options = {}) {
 module.exports = {
   __test: {
     decodeVidguardSignature,
+    isDoodHost,
     decryptFilemoonPayload,
     extractAssignedRedirect,
     extractMediafireDirectUrl,
@@ -1321,6 +1360,7 @@ module.exports = {
     isPelisplusHost,
     isStreamtapeHost,
     isSupportedEmbedServer,
+    scoreXupalaceServer,
     iterUnpackedScripts,
     normalizeEmbedUrl,
     stripPkcs7Padding

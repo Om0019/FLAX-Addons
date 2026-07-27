@@ -63,6 +63,28 @@ function proxyGet(port, targetUrl) {
   });
 }
 
+/**
+ * A dead CDN is not a blocked URL. Both stop the request, but answering 400 told a
+ * player its own request was malformed when the upstream had simply stopped
+ * resolving — seen live on an HLS variant whose master had loaded fine.
+ */
+async function testUnresolvableHostIsAGatewayFailure() {
+  const proxy = await startServer(app);
+  try {
+    const port = proxy.address().port;
+
+    const dead = await proxyGet(port, 'https://no-such-host-9z8y7x6w5v.invalid/master.m3u8');
+    assert.strictEqual(dead.status, 502, 'a host that does not resolve is an upstream failure');
+    assert.doesNotMatch(dead.body, /Blocked url/, 'and is not reported as a refusal');
+
+    const refused = await proxyGet(port, 'http://169.254.169.254/latest/meta-data/');
+    assert.strictEqual(refused.status, 400, 'a refused address is still refused');
+    assert.match(refused.body, /Blocked url/, 'and still says so');
+  } finally {
+    proxy.close();
+  }
+}
+
 async function testProxyRejectsInternalTargets() {
   const proxy = await startServer(app);
   try {
@@ -193,6 +215,8 @@ async function main() {
   testBlockedRanges();
   await testAssertPublicUrl();
   await testProxyRejectsInternalTargets();
+  await testUnresolvableHostIsAGatewayFailure();
+  console.log('ok - a dead upstream host is a gateway failure, not a blocked url');
   await testProxyValidatesRedirectHops();
   await testRedirectCapTerminates();
   await testProxyStillServesAllowedTargets();

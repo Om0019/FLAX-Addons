@@ -199,14 +199,30 @@ async function testUnplayableThinSourcesDoNotTripTheDeadline() {
   }
 }
 
-// A probe that can outlast the phase it runs in guarantees that phase times out.
-function testValidationProbeFitsInsideItsBudget() {
-  const probe = constant('STREAM_VALIDATION_TIMEOUT_MS');
+/**
+ * Probe deadlines have to stay in a sane relationship to the phases around them.
+ *
+ * A probe started in the final phase is handed that phase's own budget, so it fits
+ * by construction. An eager probe deliberately gets longer — it starts while sources
+ * are still reporting, and the phase budget bounds what anyone waits for either way
+ * — but it must not outlast collection itself, or a probe could still be running
+ * when there is no longer a request for it to inform.
+ */
+function testValidationDeadlinesFitTheirPhases() {
+  const eager = constant('STREAM_VALIDATION_EAGER_TIMEOUT_MS');
   const fast = constant('STREAM_VALIDATION_FAST_TIMEOUT_MS');
   const total = constant('STREAM_VALIDATION_TOTAL_TIMEOUT_MS');
+  const collection = constant('SCRAPER_COLLECTION_TIMEOUT_MS');
 
-  assert.ok(probe < total, `per-probe timeout (${probe}ms) must be under the phase budget (${total}ms)`);
   assert.ok(fast <= total, `fast budget (${fast}ms) should not exceed the total budget (${total}ms)`);
+  assert.ok(
+    eager >= total,
+    `the eager deadline (${eager}ms) is the longer one by design, but is under the phase budget (${total}ms)`
+  );
+  assert.ok(
+    eager <= collection,
+    `an eager probe (${eager}ms) must not outlast collection (${collection}ms)`
+  );
 }
 
 // Probes begin as each source reports rather than after all of them, so a URL can
@@ -259,7 +275,7 @@ async function main() {
   await testSingleSourceWaitsForRelaxation();
   await testConfirmedThinSourcesReturnAtRelaxationDeadline();
   await testUnplayableThinSourcesDoNotTripTheDeadline();
-  testValidationProbeFitsInsideItsBudget();
+  testValidationDeadlinesFitTheirPhases();
   console.log('Fast-return tests passed');
 }
 

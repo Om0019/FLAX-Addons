@@ -21,9 +21,11 @@
  * files usually put at the far end, which does not fit the validation budget.
  */
 
-// Rungs of an encoding ladder. Matching any three or four digit run instead —
-// even a delimited one — turns cache keys and expiry stamps into resolutions.
-const KNOWN_HEIGHTS = [2160, 1440, 1080, 720, 576, 540, 480, 360, 240];
+// Rungs of an encoding ladder, high to low. Matching any three or four digit run
+// instead — even a delimited one — turns cache keys and expiry stamps into
+// resolutions. Order matters: rungFromResolution walks this and keeps the first
+// best match, so a frame sitting exactly between two rungs is called the taller.
+const KNOWN_HEIGHTS = [2160, 1440, 1080, 900, 720, 576, 540, 480, 360, 240];
 const MAX_KNOWN_HEIGHT = 2160;
 
 // Where a bitrate sits on a typical H.264 ladder, in bps. Only consulted when a
@@ -72,7 +74,18 @@ const TIER_PATTERNS = [
 // A quality already written into a title, ours or the source's, with any bullet
 // that joins it on. Used to keep a measurement from being appended next to the
 // claim it contradicts.
-const TITLE_QUALITY_TOKEN = /\s*[•·|]?\s*(?:[≥~]?\d{3,4}p|\b(?:4k|uhd)\b)/gi;
+//
+// The tier words are here for the same reason the digits are: they are the same
+// claim in a different spelling, and matching only digits meant LaMovie's own
+// "Latino Full HD" survived a 720p measurement and reached viewers as
+// "Latino Full HD • 720p". Kept in step with TIER_PATTERNS, longest alternative
+// first so "full hd" is not left as a stray "full", and word-bounded so the "HD"
+// inside a server name like CineHDPlus is not mistaken for a claim.
+const TITLE_QUALITY_SOURCE = '\\s*[•·|]?\\s*(?:[≥~]?\\d{3,4}p|\\b(?:full\\s*hd|fhd|uhd|4k|hdcam|camrip|hdts|hd|sd|cam)\\b)';
+const TITLE_QUALITY_TOKEN = new RegExp(TITLE_QUALITY_SOURCE, 'gi');
+// Separate, non-global twin: a /g regex carries lastIndex between test() calls,
+// so the two uses must not share one object.
+const HAS_TITLE_QUALITY_TOKEN = new RegExp(TITLE_QUALITY_SOURCE, 'i');
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -129,12 +142,59 @@ function parseMasterVariants(body) {
     const bandwidth = line.match(/[:,]\s*BANDWIDTH\s*=\s*(\d+)/i);
 
     variants.push({
-      height: resolution ? parseInt(resolution[2], 10) : null,
+      height: resolution ? rungFromResolution(parseInt(resolution[1], 10), parseInt(resolution[2], 10)) : null,
       bandwidth: bandwidth ? parseInt(bandwidth[1], 10) : null
     });
   }
 
   return variants;
+}
+
+/**
+ * The ladder rung a declared frame belongs to.
+ *
+ * RESOLUTION is the encoded frame, and encoders reach a rung from either side.
+ * Scope content is mastered both as 1920x1040 and 1920x968 — the rung's width kept
+ * and the height cropped — and as 1432x720 and 1280x674, the rung's height kept and
+ * the width widened. Both shapes are live on these sources right now. Reading the
+ * height alone printed "1040p", "968p" and "674p", which name no rung a viewer or a
+ * player recognises, and sorted a 1080p-class encode by a number well below it.
+ *
+ * A height that is already a rung is left exactly as it is: that is what the encoder
+ * chose, there is nothing to infer, and it keeps the widened-width shapes (1432x720)
+ * untouched. Only a height that names no rung is resolved, from whichever of two
+ * readings is the larger:
+ *
+ *   - the width scaled to 16:9, which wins for a letterboxed frame and is what makes
+ *     1920x800 the 1080p encode everyone else calls it rather than the 900p its bare
+ *     pixel count suggests — the rung's full width is intact, only the matte is gone;
+ *   - the frame's area expressed as a 16:9 height, which wins for anything taller
+ *     than 16:9, where the width understates it (1024x768 is 720p-class, not 576p).
+ *
+ * Snapped on a ratio scale, so the gap from 360 to 480 weighs the same as the one
+ * from 1080 to 1440.
+ */
+function rungFromResolution(width, height) {
+  if (!Number.isFinite(height) || height <= 0) return null;
+  if (KNOWN_HEIGHTS.includes(height)) return height;
+  if (!Number.isFinite(width) || width <= 0) return height;
+
+  const fromWidth = (width * 9) / 16;
+  const fromArea = Math.sqrt((width * height * 9) / 16);
+  const equivalentHeight = Math.max(fromWidth, fromArea);
+
+  let rung = height;
+  let bestDistance = Infinity;
+
+  for (const candidate of KNOWN_HEIGHTS) {
+    const distance = Math.abs(Math.log(equivalentHeight / candidate));
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      rung = candidate;
+    }
+  }
+
+  return rung;
 }
 
 /**
@@ -283,14 +343,22 @@ function isMeasured(quality) {
  * A measurement replaces any quality already in the title, because the two can
  * disagree: LaMovie hands over its own "Latino 1080p" for ladders that top out at
  * 720p, and appending to that reads as "1080p • 720p". A claim never overwrites
- * another claim — there is nothing to prefer about it.
+ * another claim — there is nothing to prefer about it — and it is not restated
+ * beside one either: the claim in "Latino Full HD" is read straight back out of
+ * that title, and appending it produced "Latino Full HD • FHD".
  */
 function withQualityLabel(stream) {
   const label = formatQuality(stream?.quality);
   if (!label) return stream;
 
   const title = String(stream.title || '');
-  const base = isMeasured(stream.quality)
+  const measured = isMeasured(stream.quality);
+
+  if (!measured && HAS_TITLE_QUALITY_TOKEN.test(title)) {
+    return stream;
+  }
+
+  const base = measured
     ? title.replace(TITLE_QUALITY_TOKEN, '').trim()
     : title;
 
@@ -319,6 +387,7 @@ module.exports = {
     BANDWIDTH_LADDER,
     KNOWN_HEIGHTS,
     heightFromBandwidth,
-    parseMasterVariants
+    parseMasterVariants,
+    rungFromResolution
   }
 };
