@@ -53,6 +53,21 @@ class BlockedAddressError extends Error {
   }
 }
 
+/**
+ * A host that does not resolve at all, which is a different thing from one this
+ * module refuses to reach. Both stop the request, so this stays a subclass and
+ * every existing `instanceof BlockedAddressError` check still catches it — but the
+ * proxy can then answer a dead CDN as the upstream failure it is instead of
+ * reporting a policy refusal for a host no policy was ever consulted about. A dead
+ * variant host used to come back as 400 "Blocked url".
+ */
+class UnresolvableHostError extends BlockedAddressError {
+  constructor(message) {
+    super(message);
+    this.name = 'UnresolvableHostError';
+  }
+}
+
 function isBlockedIpv4(address) {
   const octets = address.split('.').map(Number);
   if (octets.length !== 4 || octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) {
@@ -122,14 +137,14 @@ async function resolveHost(host) {
   const lookup = dns.lookup(host, { all: true })
     .then((addresses) => {
       if (!addresses || addresses.length === 0) {
-        throw new BlockedAddressError(`Could not resolve host: ${host}`);
+        throw new UnresolvableHostError(`Could not resolve host: ${host}`);
       }
       if (ttlMs > 0) dnsCache.set(host, addresses, ttlMs);
       return addresses;
     })
     .catch((error) => {
       if (error instanceof BlockedAddressError) throw error;
-      throw new BlockedAddressError(`Could not resolve host: ${host}`);
+      throw new UnresolvableHostError(`Could not resolve host: ${host}`);
     })
     .finally(() => {
       inFlightLookups.delete(host);
@@ -209,6 +224,7 @@ function hasBlockedIpLiteralHost(rawUrl) {
 
 module.exports = {
   BlockedAddressError,
+  UnresolvableHostError,
   privateTargetsAllowed,
   MAX_REDIRECT_HOPS,
   assertPublicUrl,

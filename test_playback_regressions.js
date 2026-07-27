@@ -562,6 +562,48 @@ async function testCloudflareOriginErrorsCountAsGatewayFailures() {
   }
 }
 
+/**
+ * A CDN host that has stopped resolving and an address this proxy refuses to reach
+ * are different failures, and they were reported identically: 400 "Blocked url".
+ * Playing a stream whose variant host had died told the player its own request was
+ * malformed. Seen live on a variant chain whose master loaded fine.
+ *
+ * Classification only — this file runs with the private-target escape hatch on, so
+ * the HTTP status each one produces is asserted in test_ssrf_guard.js, where the
+ * guard is live.
+ */
+async function testDeadHostAndRefusedAddressAreDifferentFailures() {
+  const { assertPublicUrl, BlockedAddressError, UnresolvableHostError } = require('./src/net-guard');
+  const previous = process.env.ALLOW_PRIVATE_PROXY_TARGETS;
+  delete process.env.ALLOW_PRIVATE_PROXY_TARGETS;
+
+  try {
+    await assert.rejects(
+      () => assertPublicUrl('https://no-such-host-9z8y7x6w5v.invalid/master.m3u8'),
+      (error) => {
+        assert(error instanceof UnresolvableHostError, 'a host that does not resolve is unresolvable');
+        assert(error instanceof BlockedAddressError, 'and still stops the request like any refusal');
+        return true;
+      }
+    );
+
+    await assert.rejects(
+      () => assertPublicUrl('http://169.254.169.254/latest/meta-data/'),
+      (error) => {
+        assert(error instanceof BlockedAddressError, 'the metadata endpoint is still refused');
+        assert(
+          !(error instanceof UnresolvableHostError),
+          'and refusing it must not be confused with it being missing'
+        );
+        return true;
+      }
+    );
+  } finally {
+    if (previous === undefined) delete process.env.ALLOW_PRIVATE_PROXY_TARGETS;
+    else process.env.ALLOW_PRIVATE_PROXY_TARGETS = previous;
+  }
+}
+
 (async () => {
   testForwardedProtoListIsNotPastedIntoTheBaseUrl();
   console.log('ok - X-Forwarded-Proto lists do not corrupt rewritten manifest URLs');
@@ -595,6 +637,9 @@ async function testCloudflareOriginErrorsCountAsGatewayFailures() {
 
   await testCloudflareOriginErrorsCountAsGatewayFailures();
   console.log('ok - Cloudflare origin errors count as gateway failures');
+
+  await testDeadHostAndRefusedAddressAreDifferentFailures();
+  console.log('ok - a dead host and a refused address are different failures');
 
   console.log('\nPlayback regression tests passed');
 })().catch((error) => {

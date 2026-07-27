@@ -4,7 +4,7 @@ const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const scrapers = require('./scrapers');
 const { fetchTextWithTimeout, fetchWithTimeout } = require('./http');
-const { BlockedAddressError, MAX_REDIRECT_HOPS, assertPublicUrl } = require('./net-guard');
+const { BlockedAddressError, MAX_REDIRECT_HOPS, UnresolvableHostError, assertPublicUrl } = require('./net-guard');
 
 const app = express();
 const PROXY_FETCH_TIMEOUT_MS = 8000;
@@ -366,6 +366,16 @@ app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
     if (error instanceof TooManyRedirectsError) {
       console.warn('Proxy Stream Error:', error.message);
       if (!res.headersSent) return res.status(502).send('Too many redirects');
+      res.destroy();
+      return;
+    }
+
+    // Checked before BlockedAddressError, which it extends. A host that does not
+    // resolve is the upstream being gone, not a URL we refused, and answering 400
+    // told a player its request was malformed when the CDN had simply died.
+    if (error instanceof UnresolvableHostError) {
+      console.warn('Proxy Stream Error:', error.message);
+      if (!res.headersSent) return res.status(502).send('Upstream host did not resolve');
       res.destroy();
       return;
     }
