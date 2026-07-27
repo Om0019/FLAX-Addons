@@ -1,10 +1,13 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
 const { fetchTextWithTimeout, fetchWithTimeout } = require('../http');
-const { cleanText, raceTitleSearches } = require('./common');
+const { cleanText, mapWithConcurrency, raceTitleSearches } = require('./common');
 
 const SEARCH_TIMEOUT_MS = 4500;
 const PAGE_TIMEOUT_MS = 5500;
+// Each external download link is a separate file host, so these overlap a little
+// more freely than same-origin candidate probes elsewhere.
+const EXTERNAL_DOWNLOAD_CONCURRENCY = 3;
 const VALIDATION_TIMEOUT_MS = 2500;
 const PLAYER_FAST_MIN_WAIT_MS = 1000;
 const PLAYER_FAST_MIN_STREAMS = 1;
@@ -400,13 +403,19 @@ async function scrape(title, originalTitle, year, type, season, episode, options
       streams.push(stream);
     }
 
-    for (const link of externalDownloadLinks) {
-      const downloadUrl = await unpacker.resolveDownloadUrl(link.downloadUrl, userAgent, targetPageUrl, { signal });
-      const isPlayable = await isPlayableDownloadTarget(downloadUrl, userAgent, targetPageUrl, signal);
-      if (!isPlayable) continue;
+    // Every one of these is two round trips — resolve the mirror, then probe the
+    // file — and they were run one link after another while the sibling loop above
+    // already resolved its own links together. Bounded rather than unbounded
+    // because each link is a different file host.
+    const externalTargets = await mapWithConcurrency(
+      externalDownloadLinks,
+      EXTERNAL_DOWNLOAD_CONCURRENCY,
+      async (link) => {
+        const downloadUrl = await unpacker.resolveDownloadUrl(link.downloadUrl, userAgent, targetPageUrl, { signal });
+        const isPlayable = await isPlayableDownloadTarget(downloadUrl, userAgent, targetPageUrl, signal);
+        if (!isPlayable) return null;
 
-      if (!streams.some((stream) => stream.url === downloadUrl)) {
-        streams.push({
+        return {
           name: 'Cinecalidad',
           title: `⬇ ${link.serverName}`,
           url: downloadUrl,
@@ -419,7 +428,16 @@ async function scrape(title, originalTitle, year, type, season, episode, options
               }
             }
           }
-        });
+        };
+      }
+    );
+
+    // De-duplication has to happen here rather than inside the worker: two links
+    // can resolve to the same file, and concurrent workers would each see a
+    // streams list that did not yet contain the other's result.
+    for (const stream of externalTargets) {
+      if (!streams.some((existing) => existing.url === stream.url)) {
+        streams.push(stream);
       }
     }
 

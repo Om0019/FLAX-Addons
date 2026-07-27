@@ -3,6 +3,7 @@
  */
 const cheerio = require('cheerio');
 const { decodeHtmlEntities, fetchTextWithTimeout, normalizeUrl } = require('./http');
+const { firstResultInOrder } = require('./concurrency');
 
 const PLAYER_FETCH_TIMEOUT_MS = 5000;
 const PELISPLUS_FETCH_TIMEOUT_MS = 4500;
@@ -390,63 +391,6 @@ function extractXupalaceServers(html, baseUrl) {
   });
 
   return results;
-}
-
-/**
- * Runs `worker` over `items` with at most `concurrency` in flight and returns the
- * result of the earliest item that produced one — the ranking each caller sorted
- * its candidates into is the whole point, so arrival order must not override it.
- *
- * These chains used to run strictly one at a time: a page listing six mirrors paid
- * five full resolutions, each with its own page fetch and unpack, before reaching a
- * working one. Overlap is capped rather than unbounded because each candidate is a
- * *different* third-party host, and firing every mirror at once would turn one
- * lookup into a burst against all of them.
- *
- * `worker` is expected to handle its own failures, matching the sequential loops
- * this replaced, where one mirror throwing did not abandon the rest.
- */
-function firstResultInOrder(items, concurrency, worker) {
-  const pending = items.map(() => {
-    let settle;
-    const promise = new Promise((resolve) => { settle = resolve; });
-    return { promise, settle };
-  });
-
-  let cursor = 0;
-  let stopped = false;
-
-  async function runNext() {
-    while (!stopped) {
-      const index = cursor++;
-      if (index >= items.length) return;
-      let outcome = null;
-      try {
-        outcome = await worker(items[index], index);
-      } catch {
-        outcome = null;
-      }
-      pending[index].settle(outcome);
-    }
-  }
-
-  // At least one runner whenever there is anything to run: with none, no entry
-  // would ever settle and the await below would never return.
-  const runners = items.length === 0 ? 0 : Math.max(1, Math.min(concurrency, items.length));
-  Array.from({ length: runners }, () => runNext());
-
-  return (async () => {
-    for (const entry of pending) {
-      const outcome = await entry.promise;
-      if (outcome) {
-        // Later candidates are no longer wanted; runners stop after the attempt
-        // they are already inside.
-        stopped = true;
-        return outcome;
-      }
-    }
-    return null;
-  })();
 }
 
 async function resolveXupalaceServers(html, baseUrl, userAgent, options) {
@@ -1374,7 +1318,6 @@ module.exports = {
     extractStreamtapeStream,
     extractVidguardStream,
     extractVoeDirectStream,
-    firstResultInOrder,
     isPelisplusHost,
     isStreamtapeHost,
     isSupportedEmbedServer,

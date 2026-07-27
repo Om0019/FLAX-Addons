@@ -270,6 +270,66 @@ async function testTioplusEmptyTokenListReturnsImmediately() {
   }
 }
 
+// --- Cuevana3i: candidate page guesses -------------------------------------
+
+// Cuevana3i has no search endpoint, so it guesses page URLs from the title and
+// probes them. Overlapping those probes must not change which guess is used: the
+// candidate list is ordered by preference, so the earliest existing page wins even
+// when a later one answers sooner.
+async function testCuevanaProbesCandidatesConcurrentlyAndKeepsOrder() {
+  const requests = [];
+  const realFetch = global.fetch;
+
+  // The first candidate exists but is slow; a later one exists and is fast.
+  global.fetch = async (url) => {
+    const target = String(url);
+    requests.push({ url: target, at: Date.now() });
+    const isFirstCandidate = /\/pelicula\/titulo-en-espanol$/.test(target);
+    await delay(isFirstCandidate ? STUB_LATENCY_MS : 40);
+    return new Response('<html><body>ok</body></html>', {
+      status: 200,
+      headers: { 'Content-Type': 'text/html' }
+    });
+  };
+
+  try {
+    const cuevana3i = require('./src/scrapers/cuevana3i');
+    const logged = [];
+    const originalLog = console.log;
+    console.log = (...args) => logged.push(args.join(' '));
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    console.warn = () => {};
+    console.error = () => {};
+
+    try {
+      await cuevana3i.scrape('Título En Español', 'Original English Title', 2024, 'movie', null, null, { extraTitles: [] });
+    } finally {
+      console.log = originalLog;
+      console.warn = originalWarn;
+      console.error = originalError;
+    }
+
+    const probes = requests.filter((request) => /cuevana3i\.you\/pelicula\//.test(request.url));
+    assert.ok(probes.length >= 2, `several candidates are probed (saw ${probes.length})`);
+
+    const spread = probes[1].at - probes[0].at;
+    assert.ok(
+      spread < CONCURRENT_WINDOW_MS,
+      `candidate probes should overlap (${spread}ms apart, slow candidate takes ${STUB_LATENCY_MS}ms)`
+    );
+
+    const chosen = logged.find((line) => line.includes('Using candidate URL'));
+    assert.ok(chosen, 'a candidate is chosen');
+    assert.ok(
+      chosen.includes('/pelicula/titulo-en-espanol'),
+      `the earliest candidate must win even though it answered last (chose: ${chosen})`
+    );
+  } finally {
+    global.fetch = realFetch;
+  }
+}
+
 // --- Orchestrator: alternative titles must not gate the scrapers -------------
 
 const ALTERNATIVE_TITLES_MAX_WAIT_MS = constant('ALTERNATIVE_TITLES_MAX_WAIT_MS');
@@ -365,6 +425,7 @@ async function testStalledAlternativeTitlesDoNotBlockScrapers() {
     testScrapersSearchBothTitlesConcurrently,
     testSololatinoHandshakeOverlapsPageLoad,
     testTioplusEmptyTokenListReturnsImmediately,
+    testCuevanaProbesCandidatesConcurrentlyAndKeepsOrder,
     testStalledAlternativeTitlesDoNotBlockScrapers
   ];
 
