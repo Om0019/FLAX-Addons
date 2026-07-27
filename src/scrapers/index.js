@@ -83,12 +83,24 @@ const streamCache = createTtlCache({ maxEntries: STREAM_CACHE_MAX_ENTRIES });
 const hostHealth = createTtlCache({ maxEntries: HOST_HEALTH_MAX_HOSTS });
 const inFlightRequests = new Map();
 
+// A stream's hostname is a pure function of a URL that never changes, and it is
+// asked for repeatedly — by the scorer, the family grouper and the health check,
+// each of them inside a sort comparator. Parsed once per stream object instead.
+const hostByStream = new WeakMap();
+
 function getStreamHost(stream) {
+  const cached = hostByStream.get(stream);
+  if (cached !== undefined) return cached;
+
+  let host;
   try {
-    return new URL(stream.url).hostname.toLowerCase();
+    host = new URL(stream.url).hostname.toLowerCase();
   } catch {
-    return '';
+    host = '';
   }
+
+  hostByStream.set(stream, host);
+  return host;
 }
 
 function isKnownBadStream(stream) {
@@ -181,11 +193,20 @@ function getHostPenalty(health) {
   const events = health.events || [];
   if (events.length === 0) return 0;
 
-  const softFailures = events.filter((event) => event.outcome === 'soft-fail').length;
-  const successes = events.filter((event) => event.outcome === 'success').length;
-  const timeouts = events.filter((event) => event.outcome === 'timeout').length;
-  const hardFailures = events.filter((event) => event.outcome === 'hard-fail' || isHardDeadStatus(event.status)).length;
-  const gatewayFailures = events.filter((event) => event.outcome === 'gateway-fail' || isGatewayFailureStatus(event.status)).length;
+  let softFailures = 0;
+  let successes = 0;
+  let timeouts = 0;
+  let hardFailures = 0;
+  let gatewayFailures = 0;
+
+  for (const event of events) {
+    if (event.outcome === 'soft-fail') softFailures += 1;
+    if (event.outcome === 'success') successes += 1;
+    if (event.outcome === 'timeout') timeouts += 1;
+    if (event.outcome === 'hard-fail' || isHardDeadStatus(event.status)) hardFailures += 1;
+    if (event.outcome === 'gateway-fail' || isGatewayFailureStatus(event.status)) gatewayFailures += 1;
+  }
+
   const latencyPenalty = health.avgLatencyMs
     ? Math.min(3, Math.floor(Math.max(0, health.avgLatencyMs - 1500) / 1000))
     : 0;
@@ -245,32 +266,46 @@ function getHostFamily(stream) {
  * tied. Ranking on quality first would put a host known to fail behind a claim
  * written in a URL, and the claim is the weaker fact of the two.
  */
-function compareStreams(a, b) {
-  return (scoreStream(a) - scoreStream(b))
-    || (qualityRank(b.quality) - qualityRank(a.quality));
+function compareRanked(a, b) {
+  return (a.score - b.score) || (b.quality - a.quality);
+}
+
+/**
+ * Scores are computed once per stream per sort rather than on every comparison:
+ * scoring reaches into host health, which walks that host's event list, and a
+ * comparator runs O(n log n) times. Deliberately not memoised across calls — probes
+ * update host health while a request is in flight, and a later sort is supposed to
+ * see the newer verdict.
+ */
+function rankStream(stream) {
+  return {
+    stream,
+    score: scoreStream(stream),
+    family: getHostFamily(stream),
+    quality: qualityRank(stream.quality)
+  };
 }
 
 function sortStreams(streams) {
-  const ranked = [...streams].sort(compareStreams);
+  const ranked = streams.map(rankStream).sort(compareRanked);
   const byFamily = new Map();
 
-  for (const stream of ranked) {
-    const family = getHostFamily(stream);
-    if (!byFamily.has(family)) byFamily.set(family, []);
-    byFamily.get(family).push(stream);
+  for (const entry of ranked) {
+    if (!byFamily.has(entry.family)) byFamily.set(entry.family, []);
+    byFamily.get(entry.family).push(entry);
   }
 
   // Families are ordered by their own best stream, on the same comparison, so a
   // family that leads with 1080p goes ahead of an equally scored one leading with
   // 480p instead of on whichever happened to be ranked first.
   const sortedFamilies = [...byFamily.entries()]
-    .sort((a, b) => compareStreams(a[1][0], b[1][0]));
+    .sort((a, b) => compareRanked(a[1][0], b[1][0]));
 
   const diversified = [];
-  while (sortedFamilies.some(([, familyStreams]) => familyStreams.length > 0)) {
-    for (const [, familyStreams] of sortedFamilies) {
-      const stream = familyStreams.shift();
-      if (stream) diversified.push(stream);
+  while (sortedFamilies.some(([, familyEntries]) => familyEntries.length > 0)) {
+    for (const [, familyEntries] of sortedFamilies) {
+      const entry = familyEntries.shift();
+      if (entry) diversified.push(entry.stream);
     }
   }
 

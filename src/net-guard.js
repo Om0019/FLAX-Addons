@@ -1,5 +1,6 @@
 const dns = require('node:dns').promises;
 const net = require('node:net');
+const { createTtlCache } = require('./ttl-cache');
 
 // The /proxy route fetches a caller-supplied URL and returns the body, which is a
 // server-side request forgery primitive unless the destination is constrained: on a
@@ -12,6 +13,30 @@ const net = require('node:net');
 // private and reserved ranges specifically rather than IP literals as a class.
 
 const MAX_REDIRECT_HOPS = 5;
+
+// Every hop of every proxied request resolves its host, and for HLS that is once
+// per segment for the whole of playback — Node's dns.lookup is getaddrinfo on the
+// libuv threadpool, which is four threads shared with all other blocking work, so
+// a few viewers can queue behind each other on name resolution alone.
+//
+// SECURITY TRADE-OFF, read before changing: caching a resolution means a host that
+// resolved publicly is trusted for up to the TTL, which widens the DNS-rebinding
+// window this module already documents as open. Kept deliberately short, and only
+// the *addresses* are cached — never the verdict — so every request still runs the
+// full block-list check against them. Set PROXY_DNS_CACHE_TTL_MS=0 to resolve on
+// every hop, which is the pre-cache behaviour.
+const DEFAULT_DNS_CACHE_TTL_MS = 30 * 1000;
+const DNS_CACHE_MAX_HOSTS = 500;
+
+const dnsCache = createTtlCache({ maxEntries: DNS_CACHE_MAX_HOSTS });
+// Concurrent segment requests for the same host on a cold cache would each start
+// their own lookup; they share one instead.
+const inFlightLookups = new Map();
+
+function dnsCacheTtlMs() {
+  const configured = Number.parseInt(process.env.PROXY_DNS_CACHE_TTL_MS ?? '', 10);
+  return Number.isFinite(configured) ? Math.max(0, configured) : DEFAULT_DNS_CACHE_TTL_MS;
+}
 
 // Escape hatch for the deliberate case: someone self-hosting the addon alongside a
 // media source on their own LAN, and the test suite, which necessarily runs its
@@ -79,6 +104,42 @@ function isBlockedAddress(address) {
 }
 
 /**
+ * Resolves `host` to its addresses, sharing a cached answer and any lookup already
+ * in flight. Only successful resolutions are cached: a transient DNS failure must
+ * not be pinned in place, and a failure is cheap to retry.
+ */
+async function resolveHost(host) {
+  const ttlMs = dnsCacheTtlMs();
+
+  if (ttlMs > 0) {
+    const cached = dnsCache.get(host);
+    if (cached) return cached;
+  }
+
+  const pending = inFlightLookups.get(host);
+  if (pending) return pending;
+
+  const lookup = dns.lookup(host, { all: true })
+    .then((addresses) => {
+      if (!addresses || addresses.length === 0) {
+        throw new BlockedAddressError(`Could not resolve host: ${host}`);
+      }
+      if (ttlMs > 0) dnsCache.set(host, addresses, ttlMs);
+      return addresses;
+    })
+    .catch((error) => {
+      if (error instanceof BlockedAddressError) throw error;
+      throw new BlockedAddressError(`Could not resolve host: ${host}`);
+    })
+    .finally(() => {
+      inFlightLookups.delete(host);
+    });
+
+  inFlightLookups.set(host, lookup);
+  return lookup;
+}
+
+/**
  * Resolves a URL's host and rejects it when any address it maps to is private,
  * loopback, link-local or otherwise reserved.
  *
@@ -119,16 +180,7 @@ async function assertPublicUrl(rawUrl) {
     throw new BlockedAddressError(`Blocked hostname: ${host}`);
   }
 
-  let addresses;
-  try {
-    addresses = await dns.lookup(host, { all: true });
-  } catch {
-    throw new BlockedAddressError(`Could not resolve host: ${host}`);
-  }
-
-  if (addresses.length === 0) {
-    throw new BlockedAddressError(`Could not resolve host: ${host}`);
-  }
+  const addresses = await resolveHost(host);
 
   for (const { address } of addresses) {
     if (isBlockedAddress(address)) {
@@ -161,5 +213,6 @@ module.exports = {
   MAX_REDIRECT_HOPS,
   assertPublicUrl,
   hasBlockedIpLiteralHost,
-  isBlockedAddress
+  isBlockedAddress,
+  __test: { dnsCache, inFlightLookups }
 };

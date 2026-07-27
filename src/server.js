@@ -396,14 +396,18 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   }
 });
 
-// 3. Landing / Dashboard Page Route
-app.get('/', (req, res) => {
-  const host = req.get('host');
-  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+// The page is ~20KB of static markup around three substitutions, all derived from
+// the origin the request arrived on. Built once per origin rather than per request;
+// bounded because the origin comes from a caller-supplied Host header, which is
+// otherwise an unbounded key.
+const LANDING_PAGE_MAX_ORIGINS = 20;
+const landingPageByOrigin = new Map();
+
+function renderLandingPage(protocol, host) {
   const manifestUrl = `${protocol}://${host}/manifest.json`;
   const stremioInstallUrl = `stremio://${host}/manifest.json`;
 
-  res.send(`
+  return `
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -822,7 +826,25 @@ app.get('/', (req, res) => {
 
 </body>
 </html>
-  `);
+  `;
+}
+
+// 3. Landing / Dashboard Page Route
+app.get('/', (req, res) => {
+  const host = req.get('host');
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+  const origin = `${protocol}://${host}`;
+
+  let page = landingPageByOrigin.get(origin);
+  if (page === undefined) {
+    page = renderLandingPage(protocol, host);
+    if (landingPageByOrigin.size >= LANDING_PAGE_MAX_ORIGINS) {
+      landingPageByOrigin.clear();
+    }
+    landingPageByOrigin.set(origin, page);
+  }
+
+  res.send(page);
 });
 
 app.__test = {
