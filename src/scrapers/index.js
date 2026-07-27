@@ -36,13 +36,6 @@ const FAST_SOURCE_MIN_SOURCES = 2;
 // first completion onwards.
 const FAST_SOURCE_MIN_WAIT_MS = 3500;
 const FAST_SOURCE_RELAXED_MIN_SOURCES = 1;
-// The deadline used to relax the source count and leave the stream count at five,
-// which meant it almost never changed the outcome: sources return one or two
-// streams each, so five streams is four sources, and four sources is the thing the
-// deadline exists to stop waiting for. Requests sat until the fifth stream landed —
-// measured at 7.3s on a lookup where three streams were ready at 3.5s. Relax both,
-// so the deadline trades the richer result for the response it was meant to buy.
-const FAST_SOURCE_RELAXED_MIN_STREAMS = 3;
 // A single probe must be able to finish inside the phase budget below, or a slow
 // host guarantees the phase times out instead of ever completing. It used to be
 // 5000ms against a 4000ms budget, which is why validation so often burned its
@@ -352,12 +345,19 @@ function withTimeout(promise, timeoutMs, label, onTimeout) {
   });
 }
 
-async function collectScraperResults(tasks, timeoutMs, onResult) {
+async function collectScraperResults(tasks, timeoutMs, onResult, options = {}) {
   const results = [];
   let pending = tasks.length;
   let sourcesRequired = FAST_SOURCE_MIN_SOURCES;
-  let streamsRequired = FAST_SOURCE_MIN_STREAMS;
+  let deadlinePassed = false;
   let resolveFastReturn;
+
+  // How many streams the eager probes have actually confirmed playable so far.
+  // Counting raw streams alone is what made an early return worth so little: the
+  // sources on this addon hand back a lot of URLs that are already dead, so three
+  // raw streams was measured returning a single playable one while three sources
+  // that had not reported yet were aborted mid-flight.
+  const getConfirmedCount = options.getConfirmedCount || (() => 0);
 
   const hasEnoughStreamsForFastReturn = () => {
     const fulfilledWithStreams = results.filter((result) => (
@@ -365,18 +365,34 @@ async function collectScraperResults(tasks, timeoutMs, onResult) {
       && Array.isArray(result.value)
       && result.value.length > 0
     ));
+    if (fulfilledWithStreams.length < sourcesRequired) return false;
+
     const streamCount = fulfilledWithStreams.reduce((total, result) => total + result.value.length, 0);
-    return fulfilledWithStreams.length >= sourcesRequired
-      && streamCount >= streamsRequired;
+    if (streamCount >= FAST_SOURCE_MIN_STREAMS) return true;
+
+    // Past the deadline a smaller set will do, but only once the probes say those
+    // streams play. Returning on a thin set the validator then guts is strictly
+    // worse than waiting: the sources still in flight get cancelled either way.
+    return deadlinePassed && getConfirmedCount() >= MIN_CONFIRMED_STREAMS;
   };
+
+  // The confirmed count changes as probes settle, which is not a moment any source
+  // completion tells us about, so the validator pokes this when a probe comes back
+  // playable.
+  if (options.gate) {
+    options.gate.recheck = () => {
+      if (hasEnoughStreamsForFastReturn()) resolveFastReturn('enough-streams');
+    };
+  }
 
   let fastReturnTimer;
   const fastReturnPromise = new Promise((resolve) => {
     resolveFastReturn = resolve;
     fastReturnTimer = setTimeout(() => {
-      // The richer target has not arrived in time; take what is on hand.
+      // The richer target has not arrived in time; one source will do, provided
+      // what it brought has been shown to work.
+      deadlinePassed = true;
       sourcesRequired = FAST_SOURCE_RELAXED_MIN_SOURCES;
-      streamsRequired = FAST_SOURCE_RELAXED_MIN_STREAMS;
       if (hasEnoughStreamsForFastReturn()) {
         resolve('enough-streams');
       }
@@ -791,8 +807,9 @@ async function isPlayableStream(stream, signal) {
  * link, which is correct for the quality half as well: a rendition ladder belongs
  * to the URL, not to whoever listed it.
  */
-function createStreamValidator(signal) {
+function createStreamValidator(signal, onConfirmed) {
   const byUrl = new Map();
+  let confirmed = 0;
 
   return {
     validate(stream) {
@@ -805,6 +822,15 @@ function createStreamValidator(signal) {
           recordHostHealth(stream, 'soft-fail');
         }
         return verdict(false);
+      }).then((result) => {
+        // Counted here rather than at the call site because probes are shared: the
+        // eager pass and the final selection await the same promise, and a stream
+        // must only ever count once.
+        if (result && result.playable) {
+          confirmed += 1;
+          if (onConfirmed) onConfirmed();
+        }
+        return result;
       });
 
       byUrl.set(stream.url, probe);
@@ -813,6 +839,10 @@ function createStreamValidator(signal) {
 
     get started() {
       return byUrl.size;
+    },
+
+    get confirmed() {
+      return confirmed;
     }
   };
 }
@@ -1037,12 +1067,17 @@ async function getStreamsUncached(type, id, season, episode) {
     // while sources are still reporting are the same ones the final selection
     // waits on, and a single abort cancels them all.
     const validationController = new AbortController();
-    const validator = createStreamValidator(validationController.signal);
+    // The gate is handed to both sides because each needs the other: collection
+    // decides when enough streams are confirmed, and only the validator knows when
+    // that number changes.
+    const fastReturnGate = { recheck: () => {} };
+    const validator = createStreamValidator(validationController.signal, () => fastReturnGate.recheck());
 
     const collection = await collectScraperResults(
       scraperTasks,
       SCRAPER_COLLECTION_TIMEOUT_MS,
-      (streams) => startEagerValidation(streams, validator)
+      (streams) => startEagerValidation(streams, validator),
+      { getConfirmedCount: () => validator.confirmed, gate: fastReturnGate }
     );
 
     const countStreams = (results) => results.reduce((total, res) => (

@@ -133,34 +133,70 @@ async function testSingleSourceWaitsForRelaxation() {
 
 // Sources typically answer with one or two streams each, so the full five-stream
 // target is only ever met by waiting for a fourth source — exactly what the
-// relaxation deadline exists to stop doing. Relaxing only the source count left
-// the stream count binding and the request waited for the collection timeout.
-async function testThinSourcesReturnAtRelaxationDeadline() {
-  const relaxedStreams = constant('FAST_SOURCE_RELAXED_MIN_STREAMS');
-  assert.ok(
-    relaxedStreams < MIN_STREAMS,
-    'the relaxed stream target must be lower than the full one, or the deadline cannot relax anything'
-  );
-
-  // Three sources, one stream each: under the full target, at the relaxed one.
-  const orchestrator = loadOrchestratorWith({
-    LaMovie: stubScraper(150, 1, 'LaMovie'),
-    Cuevana3i: stubScraper(250, 1, 'Cuevana3i'),
-    PelisPedia: stubScraper(350, 1, 'PelisPedia'),
-    SoloLatino: stubScraper(9000, 2, 'SoloLatino'),
-    TioPlus: stubScraper(9000, 2, 'TioPlus'),
-    Cinecalidad: stubScraper(9000, 2, 'Cinecalidad')
+// relaxation deadline exists to stop doing. Past the deadline a thinner set is
+// accepted, but only once the probes have shown those streams actually play.
+async function testConfirmedThinSourcesReturnAtRelaxationDeadline() {
+  const realFetch = global.fetch;
+  global.fetch = async () => new Response('#EXTM3U\n#EXTINF:6.0,\nseg.ts\n', {
+    status: 200,
+    headers: { 'Content-Type': 'application/vnd.apple.mpegurl' }
   });
 
-  const startedAt = Date.now();
-  const streams = await orchestrator.getStreams('movie', 'tmdb:movie:3', null, null);
-  const elapsed = Date.now() - startedAt;
+  try {
+    // Three sources, one stream each: under the full target, and all playable.
+    const orchestrator = loadOrchestratorWith({
+      LaMovie: stubScraper(150, 1, 'LaMovie'),
+      Cuevana3i: stubScraper(250, 1, 'Cuevana3i'),
+      PelisPedia: stubScraper(350, 1, 'PelisPedia'),
+      SoloLatino: stubScraper(9000, 2, 'SoloLatino'),
+      TioPlus: stubScraper(9000, 2, 'TioPlus'),
+      Cinecalidad: stubScraper(9000, 2, 'Cinecalidad')
+    });
 
-  assert.ok(streams.length > 0, 'the thin sources still yield streams');
-  assert.ok(
-    elapsed < 6000,
-    `thin sources must return on the relaxation deadline, not the collection timeout (took ${elapsed}ms)`
-  );
+    const startedAt = Date.now();
+    const streams = await orchestrator.getStreams('movie', 'tmdb:movie:3', null, null);
+    const elapsed = Date.now() - startedAt;
+
+    assert.ok(streams.length > 0, 'the thin sources still yield streams');
+    assert.ok(
+      elapsed < 6000,
+      `confirmed thin sources must return on the relaxation deadline (took ${elapsed}ms)`
+    );
+  } finally {
+    global.fetch = realFetch;
+  }
+}
+
+// The counterpart, and the reason the gate counts confirmed streams rather than
+// raw ones. Sources that hand back dead URLs must not trip the early return: doing
+// so cancels the sources still in flight and hands the user whatever survives
+// validation, which was measured in production as one stream out of three.
+async function testUnplayableThinSourcesDoNotTripTheDeadline() {
+  const realFetch = global.fetch;
+  global.fetch = async () => new Response('not a playlist', { status: 404 });
+
+  try {
+    const orchestrator = loadOrchestratorWith({
+      LaMovie: stubScraper(150, 1, 'LaMovie'),
+      Cuevana3i: stubScraper(250, 1, 'Cuevana3i'),
+      PelisPedia: stubScraper(350, 1, 'PelisPedia'),
+      // Enough to satisfy the full target, but only if it is waited for.
+      SoloLatino: stubScraper(4200, MIN_STREAMS, 'SoloLatino'),
+      TioPlus: stubScraper(9000, 0, 'TioPlus'),
+      Cinecalidad: stubScraper(9000, 0, 'Cinecalidad')
+    });
+
+    const startedAt = Date.now();
+    await orchestrator.getStreams('movie', 'tmdb:movie:4', null, null);
+    const elapsed = Date.now() - startedAt;
+
+    assert.ok(
+      elapsed >= 4200,
+      `three dead streams must not trigger the early return at the deadline (returned in ${elapsed}ms)`
+    );
+  } finally {
+    global.fetch = realFetch;
+  }
 }
 
 // A probe that can outlast the phase it runs in guarantees that phase times out.
@@ -221,7 +257,8 @@ async function main() {
   await testValidatorProbesEachUrlOnce();
   await testTwoFastSourcesReturnEarly();
   await testSingleSourceWaitsForRelaxation();
-  await testThinSourcesReturnAtRelaxationDeadline();
+  await testConfirmedThinSourcesReturnAtRelaxationDeadline();
+  await testUnplayableThinSourcesDoNotTripTheDeadline();
   testValidationProbeFitsInsideItsBudget();
   console.log('Fast-return tests passed');
 }
