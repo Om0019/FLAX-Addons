@@ -86,7 +86,10 @@ async function testTmdbResponsesAreCached() {
   }
 }
 
-// A failing lookup must not be pinned in the cache for hours.
+// A failing lookup must not be pinned in the cache for hours. A 5xx now costs two
+// attempts inside one call (see the retry in tmdb.js), so the stub fails both of
+// them before recovering — the point here is that nothing was cached, not how many
+// attempts one lookup makes.
 async function testTmdbFailuresAreNotCached() {
   const tmdb = require('./src/tmdb');
   const realFetch = global.fetch;
@@ -94,7 +97,7 @@ async function testTmdbFailuresAreNotCached() {
 
   global.fetch = async () => {
     calls += 1;
-    if (calls === 1) return new Response('nope', { status: 500 });
+    if (calls <= 2) return new Response('nope', { status: 500 });
     return new Response(JSON.stringify({ id: 7, title: 'Recovered', release_date: '2024-01-01' }), {
       status: 200, headers: { 'Content-Type': 'application/json' }
     });
@@ -107,8 +110,55 @@ async function testTmdbFailuresAreNotCached() {
     assert.strictEqual(failed, null, 'a failed lookup returns null');
 
     const recovered = await tmdb.getMetaDetails('movie', '7', { includeEpisodes: false });
-    assert.strictEqual(calls, 2, 'the failure was retried rather than cached');
+    assert.strictEqual(calls, 3, 'the failure was retried rather than cached');
     assert.strictEqual(recovered.name, 'Recovered');
+  } finally {
+    global.fetch = realFetch;
+    tmdb.__test.responseCache.clear();
+  }
+}
+
+/**
+ * Every stream lookup starts with TMDB, so a blip there is not one source missing
+ * but the whole addon reporting no streams for a title that has plenty. Observed
+ * live: a burst of 503s took four consecutive lookups to zero and the endpoint was
+ * answering again seconds later.
+ */
+async function testTmdbTransientFailureIsRetried() {
+  const tmdb = require('./src/tmdb');
+  const realFetch = global.fetch;
+
+  const run = async (statuses) => {
+    let calls = 0;
+    global.fetch = async () => {
+      const status = statuses[calls] ?? 200;
+      calls += 1;
+      if (status !== 200) return new Response('nope', { status });
+      return new Response(JSON.stringify({ id: 9, title: 'Recovered', release_date: '2024-01-01' }), {
+        status: 200, headers: { 'Content-Type': 'application/json' }
+      });
+    };
+    tmdb.__test.responseCache.clear();
+    const meta = await tmdb.getMetaDetails('movie', '9', { includeEpisodes: false });
+    return { meta, calls };
+  };
+
+  try {
+    for (const status of [500, 502, 503, 429]) {
+      const { meta, calls } = await run([status]);
+      assert.strictEqual(calls, 2, `a ${status} is retried once`);
+      assert.strictEqual(meta?.name, 'Recovered', `and the retry's answer is used after a ${status}`);
+    }
+
+    // A 404 is TMDB's answer, not a blip. Retrying it would just be a second 404.
+    const notFound = await run([404, 404]);
+    assert.strictEqual(notFound.calls, 1, 'a 404 is not retried');
+    assert.strictEqual(notFound.meta, null);
+
+    // And the retry is bounded: two failures end it rather than looping.
+    const stillDown = await run([503, 503]);
+    assert.strictEqual(stillDown.calls, 2, 'a persistent outage costs exactly one retry');
+    assert.strictEqual(stillDown.meta, null);
   } finally {
     global.fetch = realFetch;
     tmdb.__test.responseCache.clear();
@@ -260,6 +310,8 @@ async function main() {
   await testCacheEviction();
   await testTmdbResponsesAreCached();
   await testTmdbFailuresAreNotCached();
+  await testTmdbTransientFailureIsRetried();
+  console.log('ok - a transient TMDB failure is retried once');
   testPkcs7PaddingStrip();
   testOptionLabelLookup();
   testWrapperSelection();

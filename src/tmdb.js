@@ -9,6 +9,25 @@ const TMDB_TIMEOUT_MS = 5000;
 // critical path for repeat lookups and keeps us well clear of TMDB's rate limit.
 const TMDB_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const TMDB_CACHE_MAX_ENTRIES = 1000;
+// Every stream lookup starts here, so a TMDB blip is not one source missing — it is
+// the whole addon answering "no streams" for a title that has plenty. Observed live:
+// a burst of 503s took four consecutive lookups to zero, and the endpoint was
+// answering normally again seconds later.
+//
+// Only a failure that came back *quickly* is retried. A 429 or a 5xx arrives in a
+// few hundred milliseconds and is usually gone on the next call, while a timeout has
+// already spent the budget every scraper is waiting behind, and spending it twice
+// would cost more than the answer is worth.
+const TMDB_RETRY_DELAY_MS = 250;
+const TMDB_RETRY_MAX_ELAPSED_MS = 1500;
+
+function isRetryableTmdbStatus(status) {
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 const responseCache = createTtlCache({ maxEntries: TMDB_CACHE_MAX_ENTRIES });
 
@@ -28,20 +47,37 @@ async function fetchFromTMDB(path, params = {}) {
     return cached;
   }
 
-  // The deadline has to span the body too: TMDB returning headers and then
-  // stalling would otherwise hang the whole stream request indefinitely.
-  const { res, data } = await fetchJsonWithTimeout(url, {}, TMDB_TIMEOUT_MS);
+  const startedAt = Date.now();
+  let lastError = null;
 
-  if (!res.ok) {
-    throw new Error(`TMDB API Error: ${res.status} ${res.statusText} at ${path}`);
-  }
-  if (data === null) {
-    throw new Error(`TMDB API returned an unparseable body at ${path}`);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt > 0) await delay(TMDB_RETRY_DELAY_MS);
+
+    // The deadline has to span the body too: TMDB returning headers and then
+    // stalling would otherwise hang the whole stream request indefinitely. A
+    // timeout throws straight out rather than being retried — see above.
+    const { res, data } = await fetchJsonWithTimeout(url, {}, TMDB_TIMEOUT_MS);
+
+    if (res.ok) {
+      if (data === null) {
+        throw new Error(`TMDB API returned an unparseable body at ${path}`);
+      }
+      // Only successful responses are cached; a transient failure must not be
+      // pinned in place for six hours.
+      return responseCache.set(url, data, TMDB_CACHE_TTL_MS);
+    }
+
+    lastError = new Error(`TMDB API Error: ${res.status} ${res.statusText} at ${path}`);
+
+    const worthRetrying = attempt === 0
+      && isRetryableTmdbStatus(res.status)
+      && Date.now() - startedAt <= TMDB_RETRY_MAX_ELAPSED_MS;
+    if (!worthRetrying) break;
+
+    console.warn(`TMDB: ${res.status} at ${path}; retrying once.`);
   }
 
-  // Only successful responses are cached; a transient failure must not be pinned
-  // in place for six hours.
-  return responseCache.set(url, data, TMDB_CACHE_TTL_MS);
+  throw lastError;
 }
 
 /**
