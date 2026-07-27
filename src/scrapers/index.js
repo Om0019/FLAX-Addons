@@ -36,6 +36,13 @@ const FAST_SOURCE_MIN_SOURCES = 2;
 // first completion onwards.
 const FAST_SOURCE_MIN_WAIT_MS = 3500;
 const FAST_SOURCE_RELAXED_MIN_SOURCES = 1;
+// The deadline used to relax the source count and leave the stream count at five,
+// which meant it almost never changed the outcome: sources return one or two
+// streams each, so five streams is four sources, and four sources is the thing the
+// deadline exists to stop waiting for. Requests sat until the fifth stream landed —
+// measured at 7.3s on a lookup where three streams were ready at 3.5s. Relax both,
+// so the deadline trades the richer result for the response it was meant to buy.
+const FAST_SOURCE_RELAXED_MIN_STREAMS = 3;
 // A single probe must be able to finish inside the phase budget below, or a slow
 // host guarantees the phase times out instead of ever completing. It used to be
 // 5000ms against a 4000ms budget, which is why validation so often burned its
@@ -349,6 +356,7 @@ async function collectScraperResults(tasks, timeoutMs, onResult) {
   const results = [];
   let pending = tasks.length;
   let sourcesRequired = FAST_SOURCE_MIN_SOURCES;
+  let streamsRequired = FAST_SOURCE_MIN_STREAMS;
   let resolveFastReturn;
 
   const hasEnoughStreamsForFastReturn = () => {
@@ -359,15 +367,16 @@ async function collectScraperResults(tasks, timeoutMs, onResult) {
     ));
     const streamCount = fulfilledWithStreams.reduce((total, result) => total + result.value.length, 0);
     return fulfilledWithStreams.length >= sourcesRequired
-      && streamCount >= FAST_SOURCE_MIN_STREAMS;
+      && streamCount >= streamsRequired;
   };
 
   let fastReturnTimer;
   const fastReturnPromise = new Promise((resolve) => {
     resolveFastReturn = resolve;
     fastReturnTimer = setTimeout(() => {
-      // Two sources have not turned up in time; one will do.
+      // The richer target has not arrived in time; take what is on hand.
       sourcesRequired = FAST_SOURCE_RELAXED_MIN_SOURCES;
+      streamsRequired = FAST_SOURCE_RELAXED_MIN_STREAMS;
       if (hasEnoughStreamsForFastReturn()) {
         resolve('enough-streams');
       }
