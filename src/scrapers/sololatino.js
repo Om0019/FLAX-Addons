@@ -115,6 +115,10 @@ async function probeFallbackCandidate(candidate, year, userAgent, signal) {
   }, PROBE_TIMEOUT_MS);
 
   if (!probeRes.ok) {
+    // Worth a line of its own: a refusal here and a genuine 404 both used to end as
+    // a bare "No matching content found", which reads as "the site does not have
+    // this title" when it can equally mean the host turned us away.
+    console.warn(`SoloLatino: Fallback probe ${candidate.url} returned HTTP ${probeRes.status}`);
     return null;
   }
   if (year && !pageHasRequestedYear(html, year)) {
@@ -250,6 +254,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
       headers: { 'User-Agent': userAgent },
       signal
     }, SEARCH_TIMEOUT_MS);
+    console.log(`SoloLatino search HTTP status for ${searchQuery}: ${res.status}`);
     if (!res.ok) return null;
     const $ = cheerio.load(html);
     const results = [];
@@ -290,6 +295,12 @@ async function scrape(title, originalTitle, year, type, season, episode, options
         bestMatch = r;
       }
     }
+
+    // The count separates the two ways a search comes back empty: zero candidates
+    // means the response carried no result links at all (an interstitial or a
+    // layout change), while candidates that all scored zero means the page was
+    // fine and the scoring rejected them.
+    console.log(`SoloLatino performSearch("${searchQuery}") found ${uniqueResults.length} candidate(s), best score ${bestScore}`);
 
     return bestMatch;
   }
