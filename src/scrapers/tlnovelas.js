@@ -7,6 +7,12 @@ const BASE_URL = 'https://ww2.tlnovelas.net';
 const SEARCH_TIMEOUT_MS = 4500;
 const PAGE_TIMEOUT_MS = 5500;
 const PLAYER_CONCURRENCY = 4;
+// Player lists are short — four servers is the most any episode carries — and every
+// extra entry costs a wrapper fetch inside the scraper's ten-second budget.
+const MAX_PLAYER_URLS = 6;
+// A trailing number this large is part of the novela's name (a year, a channel), not
+// a season marker. "El Señor De Los Cielos 10" is a season; "Rubí 2020" is not.
+const MAX_SEASON_NUMBER = 30;
 
 function browserHeaders(userAgent, extra = {}) {
   return {
@@ -28,13 +34,44 @@ function slugifyTitle(value) {
     .replace(/^-+|-+$/g, '');
 }
 
-function scoreCandidate(result, title, originalTitle, extraTitles = []) {
+/**
+ * The season-like number a title ends with, or null. Numbers past a plausible season
+ * count are names rather than markers and are reported as absent.
+ */
+function seasonNumberFromTitle(value) {
+  const match = String(value || '').trim().match(/(\d+)\s*$/);
+  if (!match) return null;
+
+  const number = parseInt(match[1], 10);
+  return number >= 1 && number <= MAX_SEASON_NUMBER ? number : null;
+}
+
+/**
+ * TLNovelas files each season as its own novela — "El Señor De Los Cielos 10" is a
+ * separate page from "El señor de los cielos", with its own capítulo 1. Scoring on
+ * title text alone ranked the unnumbered original *highest* for a season-10 request
+ * (it matches the TMDB title exactly), so whenever the numbered search lost the race
+ * or timed out, the viewer was served season 1's episode under season 10's label.
+ * A candidate whose number disagrees with the season being asked for is the wrong
+ * novela no matter how well its words match, so it scores nothing at all.
+ */
+function scoreCandidate(result, title, originalTitle, extraTitles = [], season = null) {
   const cleanTitle = cleanText(title);
   const cleanOriginal = cleanText(originalTitle);
   const cleanExtras = extraTitles.map(cleanText).filter(Boolean);
   const cleanResult = cleanText(result.title);
-  const cleanSlug = cleanText(result.url.match(/\/novela\/([^/?#]+)/)?.[1]?.replace(/-/g, ' '));
+  const slugWords = result.url.match(/\/novela\/([^/?#]+)/)?.[1]?.replace(/-/g, ' ');
+  const cleanSlug = cleanText(slugWords);
   let score = 0;
+
+  // The season wanted: the request's, or the one the title itself already names
+  // (TMDB hands back "Rosario Tijeras 5" for a show the site files under that name).
+  const wantedSeason = (season && season > 1 ? season : null)
+    ?? seasonNumberFromTitle(title)
+    ?? seasonNumberFromTitle(originalTitle);
+  const candidateSeason = seasonNumberFromTitle(result.title) ?? seasonNumberFromTitle(slugWords);
+
+  if (candidateSeason !== wantedSeason) return 0;
 
   if (cleanTitle && cleanResult === cleanTitle) score += 8;
   if (cleanTitle && cleanSlug === cleanTitle) score += 8;
@@ -120,7 +157,7 @@ async function search(title, originalTitle, season, userAgent, signal, extraTitl
       let bestMatch = null;
       let bestScore = 0;
       for (const result of extractSearchResults(html)) {
-        const score = scoreCandidate(result, query, originalTitle, [title, ...extraTitles]);
+        const score = scoreCandidate(result, query, originalTitle, [title, ...extraTitles], season);
         if (score > bestScore) {
           bestMatch = result;
           bestScore = score;
@@ -148,11 +185,14 @@ async function search(title, originalTitle, season, userAgent, signal, extraTitl
     if (!slug) continue;
     const url = `${BASE_URL}/novela/${slug}/`;
     try {
-      const { res } = await fetchTextWithTimeout(url, {
+      const { res, text } = await fetchTextWithTimeout(url, {
         headers: browserHeaders(userAgent),
         signal
       }, SEARCH_TIMEOUT_MS);
-      if (res.ok) return url;
+      // The site answers 200 with a "no encontrado" shell for a novela it does not
+      // have, so res.ok says nothing about whether the guess landed. A real novela
+      // page lists its capítulos; that is the check worth making.
+      if (res.ok && isNovelaPage(text)) return url;
     } catch {
       // Try the next direct slug.
     }
@@ -161,8 +201,16 @@ async function search(title, originalTitle, season, userAgent, signal, extraTitl
   return null;
 }
 
+/** Whether a page is a real novela page rather than the site's soft-404 shell. */
+function isNovelaPage(html) {
+  return /href=["'][^"']*\/ver\/[^"']*["']/i.test(String(html || ''));
+}
+
+// The separator is deliberately loose: the number lives in the link text on some
+// layouts ("Capítulo 17") and only in the href on others ("…-capitulo-17/"), and a
+// whitespace-only separator never matched the second.
 function episodeNumberFromText(value) {
-  const match = String(value || '').match(/cap[ií]tulo\s*(\d+)/i);
+  const match = String(value || '').match(/cap[ií]tulo[\s._-]*(\d+)/i);
   return match ? parseInt(match[1], 10) : null;
 }
 
@@ -182,14 +230,63 @@ function findEpisodeUrl(html, pageUrl, episode) {
   return candidates[0] || null;
 }
 
+/**
+ * The hosts behind the site's own player shorthand. Episode pages do not always
+ * carry a URL: the older layouts store `e[0]='bLLNfskCqRvm|1'`, and the page's
+ * v_ideo() helper (themes/dark/js/dodo.min.js) turns the trailing digit into one of
+ * these prefixes before building the iframe. Read literally, those entries resolve
+ * against the episode page itself and every one of them was fetched as
+ * `…/ver/<episode>/bLLNfskCqRvm|1` — a 404 on the novela site, so the episodes that
+ * use this layout offered nothing at all.
+ */
+const PLAYER_SHORTHAND_HOSTS = {
+  1: 'https://hqq.to/e/',
+  2: 'https://dood.yt/e/',
+  3: 'https://player.ojearanime.com/e/',
+  4: 'https://player.vernovelastv.net/e/'
+};
+
+function expandPlayerEntry(value) {
+  const text = String(value || '').trim();
+  const match = text.match(/^([A-Za-z0-9_-]+)\|(\d)$/);
+  const prefix = match ? PLAYER_SHORTHAND_HOSTS[match[2]] : null;
+  // An unknown suffix is left alone, exactly as v_ideo() leaves it: the site treats
+  // anything it does not recognise as a ready-made URL.
+  return prefix ? `${prefix}${match[1]}` : text;
+}
+
+/** Static assets and the novela site's own pages are never players. */
+function isPlayerCandidate(url) {
+  try {
+    const parsed = new URL(url);
+    if (!/^https?:$/.test(parsed.protocol)) return false;
+    if (/(^|\.)tlnovelas\.net$/i.test(parsed.hostname)) return false;
+    return !/\.(?:js|css|png|jpe?g|gif|webp|svg|ico|woff2?|ttf|eot)$/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+/** Whether a URL has the shape of a video wrapper or a stream, rather than a guess. */
+function looksLikePlayer(url) {
+  try {
+    const path = new URL(url).pathname;
+    return /\.(?:m3u8|mp4|mkv)$/i.test(path)
+      || /^\/(?:e|v|f|d)\//i.test(path)
+      || /\/embed/i.test(path);
+  } catch {
+    return false;
+  }
+}
+
 function extractPlayerUrls(html, pageUrl) {
   const $ = cheerio.load(html || '');
   const urls = [];
   const seen = new Set();
 
   function addUrl(value) {
-    const url = normalizeUrl(value, pageUrl);
-    if (!url || seen.has(url)) return;
+    const url = normalizeUrl(expandPlayerEntry(value), pageUrl);
+    if (!url || seen.has(url) || !isPlayerCandidate(url)) return;
     seen.add(url);
     urls.push(url);
   }
@@ -210,7 +307,27 @@ function extractPlayerUrls(html, pageUrl) {
     }
   }
 
-  return urls;
+  // The last pattern is a wide net — it catches ad tags and analytics endpoints
+  // alongside players — so anything that does not look like a wrapper follows the
+  // ones that do instead of taking their place in the concurrency window.
+  return [...urls.filter(looksLikePlayer), ...urls.filter((url) => !looksLikePlayer(url))]
+    .slice(0, MAX_PLAYER_URLS);
+}
+
+/**
+ * Names the wrapper a stream came from. The list is built in completion order and
+ * failed players are dropped, so a positional label reads "Opcion 2, Opcion 4" for
+ * two working servers and tells the viewer nothing about either.
+ */
+function playerLabel(url) {
+  try {
+    const labels = new URL(url).hostname.toLowerCase().split('.');
+    const name = labels.find((label) => !['www', 'player', 'embed', 'cdn', 'play'].includes(label))
+      || labels[0];
+    return name.charAt(0).toUpperCase() + name.slice(1);
+  } catch {
+    return 'Opcion';
+  }
 }
 
 async function scrape(title, originalTitle, year, type, season, episode, options = {}) {
@@ -247,14 +364,14 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     const playerUrls = extractPlayerUrls(episodeHtml, episodeUrl);
     console.log(`TLNovelas: Found ${playerUrls.length} player URLs`);
 
-    return await mapWithConcurrency(playerUrls, PLAYER_CONCURRENCY, async (playerUrl, index) => {
+    return await mapWithConcurrency(playerUrls, PLAYER_CONCURRENCY, async (playerUrl) => {
       try {
         const resolvedUrl = await unpacker.resolvePlayerStream(playerUrl, userAgent, episodeUrl, { signal });
         if (!resolvedUrl) return null;
 
         return {
           name: 'TLNovelas',
-          title: `Opcion ${index + 1}`,
+          title: `🇲🇽 ${playerLabel(playerUrl)}`,
           url: resolvedUrl,
           behaviorHints: {
             notWebReady: true,
@@ -280,11 +397,16 @@ async function scrape(title, originalTitle, year, type, season, episode, options
 module.exports = {
   scrape,
   __test: {
+    expandPlayerEntry,
     extractPlayerUrls,
     extractSearchResults,
     buildSearchTitles,
+    episodeNumberFromText,
     findEpisodeUrl,
+    isNovelaPage,
+    playerLabel,
     scoreCandidate,
+    seasonNumberFromTitle,
     slugifyTitle
   }
 };

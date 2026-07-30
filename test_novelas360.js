@@ -4,8 +4,11 @@ const novelas360 = require('./src/scrapers/novelas360');
 const {
   buildSearchTitles,
   episodeNumberFromText,
+  episodeUrlCandidates,
   extractEpisodeResults,
   extractPlayerUrls,
+  isPlayableCandidate,
+  playerLabel,
   scoreEpisodeCandidate,
   slugifyTitle,
   titleWithoutEpisode
@@ -56,5 +59,37 @@ assert.deepStrictEqual(
   ],
   'player extractor reads iframe and script URLs'
 );
+
+// Only some novelas carry the duplicate-slug "-1" suffix; probing for it alone
+// missed every novela filed under the plain URL and fell through to the slow search.
+assert.deepStrictEqual(
+  episodeUrlCandidates('carrusel', 20),
+  [
+    'https://novelas360.com/video/carrusel-capitulo-20/',
+    'https://novelas360.com/video/carrusel-capitulo-20-1/'
+  ],
+  'the canonical episode URL is tried before the duplicate-slug variant'
+);
+
+// The wrapper appears in two shapes, and newer posts use the one a host-and-query
+// check rejected — those episodes extracted their player and then discarded it.
+assert.strictEqual(
+  isPlayableCandidate('https://novelas360.cyou/e/eHJmTjZSK2V3NDk1NVppOVROSk1rUT09'),
+  true,
+  'the plain /e/ embed form is playable'
+);
+assert.strictEqual(
+  isPlayableCandidate('https://novelas360.example/player/embed_player.php?vid=abc'),
+  true,
+  'the embed is recognised by its path, not by the domain it is served from'
+);
+assert.strictEqual(isPlayableCandidate('https://novelas360.com/wp-content/theme.js'), false);
+assert.strictEqual(
+  isPlayableCandidate('https://www.youtube.com/watch?v=5TfgESJVonw'),
+  false,
+  'the trailer and social embeds every post carries are not players'
+);
+
+assert.strictEqual(playerLabel('https://novelas360.cyou/player/embed_player.php?vid=abc'), 'Novelas360');
 
 console.log('Novelas360 tests passed');

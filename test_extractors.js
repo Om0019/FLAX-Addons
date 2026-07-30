@@ -444,6 +444,33 @@ async function testByseCaptchaGateIsRecognised() {
   }
 }
 
+/**
+ * Novelas360 serves netu's player from its own domain. The only plain-text .m3u8 on
+ * that page is netu's placeholder clip, which the generic path would have handed
+ * over as the episode.
+ */
+async function testNetuClonePlaceholderIsNotServed() {
+  const realFetch = global.fetch;
+  const placeholder = 'https://4fw4gd.cfglobalcdn.com/secip/1/abc/1606597200/hls-vod-s03/flv/api/files/videos/2018/08/01/153311550983uua.mp4.m3u8';
+
+  global.fetch = async () => new Response(
+    `<html><body><script>olplayer.src({src: '${placeholder}', type: 'application/x-mpegURL'});</script></body></html>`,
+    { status: 200, headers: { 'content-type': 'text/html' } }
+  );
+
+  try {
+    const resolved = await resolvePlayerStream(
+      'https://novelas360.cyou/player/embed_player.php?vid=V2xQVlR2Tk9qQjNkN0lRb3AyK0xQUT09',
+      userAgent,
+      'https://novelas360.com/video/lo-que-la-vida-me-robo-capitulo-1/'
+    );
+
+    assert.strictEqual(resolved, null, "netu's placeholder clip is never offered as a stream");
+  } finally {
+    global.fetch = realFetch;
+  }
+}
+
 /** Builds an embed69 page whose dataLink carries the given servers, encrypted the
  *  way the site does: AES-256-CBC under a key derived from a solved proof-of-work. */
 function buildEmbed69Page(servers) {
@@ -609,6 +636,7 @@ async function run() {
     ['Dead JS redirect falls through', testDeadJsRedirectFallsThrough],
     ['Filemoon payload decryption', testFilemoonPayloadDecryption],
     ['Byse captcha gate is recognised', testByseCaptchaGateIsRecognised],
+    ['netu clone placeholder is not served', testNetuClonePlaceholderIsNotServed],
     ['embed69 ranks challenge-gated hosts last', testEmbed69RanksFilemoonLast],
     ['Streamtape split URL extraction', testStreamtapeExtraction],
     ['Assigned-variable redirect extraction', testAssignedRedirectExtraction],
