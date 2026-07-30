@@ -4,6 +4,7 @@ const tlnovelas = require('./src/scrapers/tlnovelas');
 const {
   extractPlayerUrls,
   extractSearchResults,
+  buildSearchTitles,
   findEpisodeUrl,
   scoreCandidate,
   slugifyTitle
@@ -12,6 +13,21 @@ const {
 const BASE = 'https://ww2.tlnovelas.net';
 
 assert.strictEqual(slugifyTitle('El Señor De Los Cielos 10'), 'el-senor-de-los-cielos-10');
+assert.deepStrictEqual(
+  buildSearchTitles('El señor de los cielos', 'The Lord of the Skies', 10),
+  [
+    'El señor de los cielos 10',
+    'El señor de los cielos',
+    'The Lord of the Skies 10',
+    'The Lord of the Skies'
+  ],
+  'seasoned novelas are searched by their TLNovelas title first'
+);
+assert.deepStrictEqual(
+  buildSearchTitles('El Señor De Los Cielos 10', 'El Señor De Los Cielos', 10).slice(0, 2),
+  ['El Señor De Los Cielos 10', 'El Señor De Los Cielos'],
+  'already-numbered TLNovelas titles are not doubled'
+);
 
 const searchHtml = `
   <div class="vk-poster">

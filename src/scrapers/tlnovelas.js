@@ -52,6 +52,32 @@ function scoreCandidate(result, title, originalTitle, extraTitles = []) {
   return score;
 }
 
+function titleHasTrailingNumber(value) {
+  return /\b\d+\s*$/.test(String(value || '').trim());
+}
+
+function buildSearchTitles(title, originalTitle, season, extraTitles = []) {
+  const seen = new Set();
+  const candidates = [];
+
+  function add(value) {
+    const text = String(value || '').trim();
+    const key = cleanText(text);
+    if (!text || seen.has(key)) return;
+    seen.add(key);
+    candidates.push(text);
+  }
+
+  for (const value of [title, originalTitle, ...extraTitles]) {
+    if (season && season > 1 && value && !titleHasTrailingNumber(value)) {
+      add(`${value} ${season}`);
+    }
+    add(value);
+  }
+
+  return candidates;
+}
+
 function extractSearchResults(html) {
   const $ = cheerio.load(html || '');
   const results = [];
@@ -79,8 +105,8 @@ function extractSearchResults(html) {
   return results;
 }
 
-async function search(title, originalTitle, userAgent, signal, extraTitles = []) {
-  const queries = [...new Set([title, originalTitle, ...extraTitles].filter(Boolean))];
+async function search(title, originalTitle, season, userAgent, signal, extraTitles = []) {
+  const queries = buildSearchTitles(title, originalTitle, season, extraTitles);
 
   async function runQuery(query) {
     try {
@@ -94,7 +120,7 @@ async function search(title, originalTitle, userAgent, signal, extraTitles = [])
       let bestMatch = null;
       let bestScore = 0;
       for (const result of extractSearchResults(html)) {
-        const score = scoreCandidate(result, title, originalTitle, extraTitles);
+        const score = scoreCandidate(result, query, originalTitle, [title, ...extraTitles]);
         if (score > bestScore) {
           bestMatch = result;
           bestScore = score;
@@ -117,7 +143,7 @@ async function search(title, originalTitle, userAgent, signal, extraTitles = [])
     if (match) return match;
   }
 
-  for (const candidate of [title, originalTitle, ...extraTitles]) {
+  for (const candidate of queries) {
     const slug = slugifyTitle(candidate);
     if (!slug) continue;
     const url = `${BASE_URL}/novela/${slug}/`;
@@ -194,7 +220,7 @@ async function scrape(title, originalTitle, year, type, season, episode, options
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   try {
-    const pageUrl = await search(title, originalTitle, userAgent, signal, extraTitles);
+    const pageUrl = await search(title, originalTitle, season, userAgent, signal, extraTitles);
     if (!pageUrl) {
       console.log(`TLNovelas: No matching content found for "${title}"`);
       return [];
@@ -256,6 +282,7 @@ module.exports = {
   __test: {
     extractPlayerUrls,
     extractSearchResults,
+    buildSearchTitles,
     findEpisodeUrl,
     scoreCandidate,
     slugifyTitle
