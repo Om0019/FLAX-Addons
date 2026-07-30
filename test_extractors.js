@@ -318,6 +318,15 @@ function testPackedStreamAdFilter() {
     null,
     'the unpacked path rejects ad assets too'
   );
+
+  assert.strictEqual(
+    extractDirectStream(
+      '<script>/* player.src({src:"https://cdn.example.net/stale/master.m3u8"}); */</script>',
+      'https://host.example/e/abc'
+    ),
+    null,
+    'commented-out player configs are ignored'
+  );
 }
 
 // An adblock detector or back-button handler assigns location.href on pages that
@@ -400,6 +409,39 @@ function testFilemoonPayloadDecryption() {
   );
 
   assert.strictEqual(decryptFilemoonPayload({ key_parts: [] }), null, 'an empty payload is rejected');
+}
+
+async function testByseCaptchaGateIsRecognised() {
+  const realFetch = global.fetch;
+  const requests = [];
+
+  global.fetch = async (url, options = {}) => {
+    requests.push({ url: String(url), options });
+    assert.strictEqual(
+      String(url),
+      'https://bysejikuar.com/api/videos/56w42pouykk2/embed/settings',
+      'Byse embeds should use the Filemoon-style settings API before fetching HTML'
+    );
+    assert.strictEqual(options.headers?.['X-Embed-Origin'], 'ww2.tlnovelas.net');
+
+    return new Response(JSON.stringify({ captcha_required: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+
+  try {
+    const resolved = await resolvePlayerStream(
+      'https://bysejikuar.com/e/56w42pouykk2',
+      userAgent,
+      'https://ww2.tlnovelas.net/ver/lo-que-la-vida-me-robo-capitulo-1/'
+    );
+
+    assert.strictEqual(resolved, null, 'captcha-gated Byse files are skipped server-side');
+    assert.strictEqual(requests.length, 1, 'captcha-gated files stop after the settings probe');
+  } finally {
+    global.fetch = realFetch;
+  }
 }
 
 /** Builds an embed69 page whose dataLink carries the given servers, encrypted the
@@ -566,6 +608,7 @@ async function run() {
     ['Packed stream ad filter', testPackedStreamAdFilter],
     ['Dead JS redirect falls through', testDeadJsRedirectFallsThrough],
     ['Filemoon payload decryption', testFilemoonPayloadDecryption],
+    ['Byse captcha gate is recognised', testByseCaptchaGateIsRecognised],
     ['embed69 ranks challenge-gated hosts last', testEmbed69RanksFilemoonLast],
     ['Streamtape split URL extraction', testStreamtapeExtraction],
     ['Assigned-variable redirect extraction', testAssignedRedirectExtraction],

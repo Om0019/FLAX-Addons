@@ -109,7 +109,10 @@ function isPlausibleStreamUrl(link) {
 function extractDirectStream(html, baseUrl) {
   if (!html) return null;
 
-  const normalizedHtml = decodeHtmlEntities(html).replace(/\\\//g, '/');
+  const normalizedHtml = decodeHtmlEntities(html)
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\\\//g, '/');
 
   // 1. Check for un-packed HLS/MP4 links directly first (e.g. goodstream, emturbovid)
   const directRegex = /(https?:[^\s'"`<>]+?\.(?:m3u8|mp4|mkv)[^\s'"`<>]*)/gi;
@@ -198,7 +201,9 @@ function isDoodHost(value) {
 }
 
 function isFilemoonHost(value) {
-  return /(^|\.)filemoon\.(?:sx|to|in|nl|wt|eu|art)$/i.test(getHostname(value));
+  return /(^|\.)filemoon\.(?:sx|to|in|nl|wt|eu|art)$/i.test(getHostname(value))
+    || /(^|\.)bysejikuar\.com$/i.test(getHostname(value))
+    || /(^|\.)q8y5z\.com$/i.test(getHostname(value));
 }
 
 // voe.sx itself only ever serves a redirect stub; the player lives on a mirror
@@ -1148,7 +1153,7 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
 
         if (isFilemoonHost(url)) {
             const directUrl = await resolveFilemoon(url, userAgent, referer, signal);
-            if (directUrl) return directUrl;
+            return directUrl;
         }
 
         const { res, text: html } = await fetchTextWithTimeout(url, {
