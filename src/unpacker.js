@@ -218,9 +218,16 @@ function isVoeHost(value) {
 
 // waaw.to, netu.tv and hqq.tv are the same player behind different brands: the
 // same /f/ -> /e/ rewrite and http_referer parameter applies to all of them.
+//
+// Sites that license the player serve it from their own domain: novelas360.cyou is
+// netu's embed_player.php verbatim, down to the get_md5.php handshake and the
+// support@netu.tv address in its markup. Those belong here too — on the generic
+// path, the only plain-text .m3u8 such a page carries is netu's placeholder clip,
+// and a viewer would have been handed it as if it were the episode.
 function isNetuFamilyHost(value) {
   const host = getHostname(value);
-  return /(^|\.)(?:waaw\d?|netu|netuplayer|hqq\d?)\.(?:to|tv|ac|watch|com|net)$/i.test(host);
+  return /(^|\.)(?:waaw\d?|netu|netuplayer|hqq\d?)\.(?:to|tv|ac|watch|com|net)$/i.test(host)
+    || /(^|\.)novelas360\.cyou$/i.test(host);
 }
 
 function isNuploadHost(value) {

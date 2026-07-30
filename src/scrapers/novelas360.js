@@ -7,6 +7,10 @@ const BASE_URL = 'https://novelas360.com';
 const SEARCH_TIMEOUT_MS = 5000;
 const PAGE_TIMEOUT_MS = 6500;
 const PLAYER_CONCURRENCY = 3;
+// Guessed URLs are cheap when they miss (the site 404s promptly) but the whole
+// lookup has ten seconds, and a stalling host must not spend all of it before the
+// search path is ever tried.
+const MAX_DIRECT_PROBES = 4;
 
 function browserHeaders(userAgent, extra = {}) {
   return {
@@ -157,9 +161,48 @@ function extractPlayerUrls(html, pageUrl) {
   return urls;
 }
 
+/**
+ * The site serves one wrapper per episode, and it appears in two shapes: the
+ * embed_player.php query form on older posts and a plain /e/<id> on newer ones.
+ * Pinning the check to one host and one of those paths dropped the other outright —
+ * every Carrusel and Marea de Pasiones episode extracted its player and then threw
+ * it away — while still admitting nothing when the host is renamed again. The path
+ * is what identifies a wrapper; the domain is not.
+ */
 function isPlayableCandidate(url) {
-  return /novelas360\.cyou\/player\/embed_player\.php/i.test(url)
-    || /\.(?:m3u8|mp4|mkv)(?:$|[?#])/i.test(url);
+  try {
+    const path = new URL(url).pathname;
+    return /\/player\/embed_player\.php$/i.test(path)
+      || /^\/(?:e|f|v)\/[^/]+/i.test(path)
+      || /\.(?:m3u8|mp4|mkv)$/i.test(path);
+  } catch {
+    return false;
+  }
+}
+
+/** Names the wrapper a stream came from, so options are told apart by host. */
+function playerLabel(url) {
+  try {
+    const labels = new URL(url).hostname.toLowerCase().split('.');
+    const name = labels.find((label) => !['www', 'player', 'embed', 'cdn', 'play'].includes(label))
+      || labels[0];
+    return name.charAt(0).toUpperCase() + name.slice(1);
+  } catch {
+    return 'Opcion';
+  }
+}
+
+/**
+ * The episode page URLs the site is known to use. `-capitulo-N/` is the canonical
+ * one; the `-1` suffix is a duplicate-slug artifact that only some novelas carry,
+ * and probing solely for it missed every novela that does not (Carrusel, Marea de
+ * Pasiones and the rest), sending those lookups down the slower search path.
+ */
+function episodeUrlCandidates(slug, episode) {
+  return [
+    `${BASE_URL}/video/${slug}-capitulo-${episode}/`,
+    `${BASE_URL}/video/${slug}-capitulo-${episode}-1/`
+  ];
 }
 
 async function fetchPageOk(url, userAgent, signal) {
@@ -178,12 +221,17 @@ async function fetchPageOk(url, userAgent, signal) {
 async function findEpisodeUrl(title, originalTitle, season, episode, userAgent, signal, extraTitles = []) {
   const queries = buildSearchTitles(title, originalTitle, season, extraTitles);
 
+  let probesLeft = MAX_DIRECT_PROBES;
   for (const query of queries) {
     const slug = slugifyTitle(query);
     if (!slug) continue;
-    const url = `${BASE_URL}/video/${slug}-capitulo-${episode}-1/`;
-    const html = await fetchPageOk(url, userAgent, signal);
-    if (html) return { url, html };
+
+    for (const url of episodeUrlCandidates(slug, episode)) {
+      if (probesLeft <= 0) break;
+      probesLeft -= 1;
+      const html = await fetchPageOk(url, userAgent, signal);
+      if (html) return { url, html };
+    }
   }
 
   async function runQuery(query) {
@@ -244,14 +292,14 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     const playerUrls = extractPlayerUrls(episodeHtml, episodeMatch.url).filter(isPlayableCandidate);
     console.log(`Novelas360: Found ${playerUrls.length} player URLs`);
 
-    return await mapWithConcurrency(playerUrls, PLAYER_CONCURRENCY, async (playerUrl, index) => {
+    return await mapWithConcurrency(playerUrls, PLAYER_CONCURRENCY, async (playerUrl) => {
       try {
         const resolvedUrl = await unpacker.resolvePlayerStream(playerUrl, userAgent, episodeMatch.url, { signal });
         if (!resolvedUrl) return null;
 
         return {
           name: 'Novelas360',
-          title: `Opcion ${index + 1}`,
+          title: `🇲🇽 ${playerLabel(playerUrl)}`,
           url: resolvedUrl,
           behaviorHints: {
             notWebReady: true,
@@ -279,6 +327,8 @@ module.exports = {
   __test: {
     buildSearchTitles,
     episodeNumberFromText,
+    episodeUrlCandidates,
+    playerLabel,
     extractEpisodeResults,
     extractPlayerUrls,
     isPlayableCandidate,
