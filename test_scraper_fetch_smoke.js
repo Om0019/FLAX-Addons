@@ -42,7 +42,8 @@ const scrapers = {
   cinecalidad: require('./src/scrapers/cinecalidad'),
   cuevana3i: require('./src/scrapers/cuevana3i'),
   lamovie: require('./src/scrapers/lamovie'),
-  pelispedia: require('./src/scrapers/pelispedia')
+  pelispedia: require('./src/scrapers/pelispedia'),
+  ennovelas: require('./src/scrapers/ennovelas')
 };
 
 // Silence scraper chatter so only failures show.

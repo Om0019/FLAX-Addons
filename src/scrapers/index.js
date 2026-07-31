@@ -8,6 +8,7 @@ const lamovie = require('./lamovie');
 const pelispedia = require('./pelispedia');
 const tlnovelas = require('./tlnovelas');
 const novelas360 = require('./novelas360');
+const ennovelas = require('./ennovelas');
 const { fetchTextWithTimeout, normalizeUrl } = require('../http');
 const { hasBlockedIpLiteralHost } = require('../net-guard');
 const { createTtlCache } = require('../ttl-cache');
@@ -1182,7 +1183,8 @@ async function getStreamsUncached(type, id, season, episode) {
       createScraperTask(lamovie, 'LaMovie', buildScraperArgs('LaMovie', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
       createScraperTask(pelispedia, 'PelisPedia', buildScraperArgs('PelisPedia', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
       createScraperTask(tlnovelas, 'TLNovelas', buildScraperArgs('TLNovelas', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
-      createScraperTask(novelas360, 'Novelas360', buildScraperArgs('Novelas360', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles)
+      createScraperTask(novelas360, 'Novelas360', buildScraperArgs('Novelas360', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
+      createScraperTask(ennovelas, 'Ennovelas', buildScraperArgs('Ennovelas', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles)
     ];
 
     if (ENABLE_CINEHDPLUS) {
