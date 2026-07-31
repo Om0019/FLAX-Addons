@@ -89,6 +89,29 @@ const NON_STREAM_MARKERS = [
 // stream URLs live — that check threw away the stream it was meant to protect.
 const AD_SEGMENT_PATTERN = /(?:^|[/.])(?:ads?|advert(?:s|ising)?|adserver|doubleclick)(?:[/.]|$)/;
 
+/**
+ * Undoes JSON string escaping left inside a URL that was scraped out of an
+ * embedded payload rather than out of markup.
+ *
+ * ok.ru is the case this was written for: its player config is JSON escaped twice
+ * over, so the manifest URL arrives as
+ * `...?cmd=videoPlayerCdn\\u0026expires=...\\u0026sig=...`. Every separator after
+ * the first is then part of one enormous parameter value, and the host answers 400.
+ * Decoding the escapes and dropping the trailing backslash the capture picks up
+ * turns exactly that URL into a 200 and a real #EXTM3U playlist.
+ *
+ * Only the escapes that can legitimately appear in a URL are decoded — an
+ * arbitrary \uXXXX would be re-encoding territory, not repair.
+ */
+function cleanEscapedStreamUrl(link) {
+  return String(link || '')
+    .replace(/\\+u0026/gi, '&')
+    .replace(/\\+u003[dD]/g, '=')
+    .replace(/\\+u002[fF]/g, '/')
+    .replace(/\\+u003[fF]/g, '?')
+    .replace(/\\+$/, '');
+}
+
 /** True when a URL looks like a real media asset rather than an ad or analytics one. */
 function isPlausibleStreamUrl(link) {
   const lower = String(link || '').toLowerCase();
@@ -156,7 +179,10 @@ function extractDirectStream(html, baseUrl) {
     ...protocolRelativeMatches,
     ...relativeMatches,
     ...configuredMatches
-  ].map((link) => normalizeUrl(link, baseUrl)).filter(Boolean).filter(isPlausibleStreamUrl);
+  ].map(cleanEscapedStreamUrl)
+    .map((link) => normalizeUrl(link, baseUrl))
+    .filter(Boolean)
+    .filter(isPlausibleStreamUrl);
 
   if (validDirect.length > 0) {
     return [...new Set(validDirect)][0];
@@ -165,7 +191,11 @@ function extractDirectStream(html, baseUrl) {
   // 2. Scan and unpack packed scripts (e.g. vidhide, hlswish, vimeos)
   for (const unpacked of iterUnpackedScripts(normalizedHtml)) {
     const streamMatches = unpacked.match(directRegex) || [];
-    const validStreams = streamMatches.map((link) => normalizeUrl(link, baseUrl)).filter(Boolean).filter(isPlausibleStreamUrl);
+    const validStreams = streamMatches
+      .map(cleanEscapedStreamUrl)
+      .map((link) => normalizeUrl(link, baseUrl))
+      .filter(Boolean)
+      .filter(isPlausibleStreamUrl);
 
     if (validStreams.length > 0) {
       return [...new Set(validStreams)][0];
@@ -1387,6 +1417,7 @@ async function resolveDownloadUrl(url, userAgent, referer, options = {}) {
 
 module.exports = {
   __test: {
+    cleanEscapedStreamUrl,
     decodeVidguardSignature,
     isDefunctHost,
     isDoodHost,

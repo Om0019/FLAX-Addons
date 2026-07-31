@@ -8,6 +8,7 @@ const http = require('http');
 const { extractDirectStream, resolvePlayerStream, resolveDownloadUrl, __test } = require('./src/unpacker');
 
 const {
+  cleanEscapedStreamUrl,
   decodeVidguardSignature,
   decryptFilemoonPayload,
   extractAssignedRedirect,
@@ -653,8 +654,48 @@ async function testDefunctHostSkip() {
   assert.ok(Date.now() - started < 1000, 'defunct host must be skipped without a request');
 }
 
+/**
+ * ok.ru's player config is JSON-escaped twice, so its manifest URL reaches the
+ * generic extractor with every `&` written as `\\u0026` and a stray trailing
+ * backslash. Served that way the host answers 400 with a one-byte body; repaired,
+ * the same URL returns a real playlist. Measured against a live ok.ru embed, which
+ * is roughly a fifth of the player links the Ennovelas source hands over.
+ */
+function testEscapedStreamUrlRepair() {
+  const escaped = 'https://vd238.okcdn.ru/video.m3u8?cmd=videoPlayerCdn\\\\u0026expires=1785560124152\\\\u0026sig=ss0c6pi83lQ\\';
+  assert.strictEqual(
+    cleanEscapedStreamUrl(escaped),
+    'https://vd238.okcdn.ru/video.m3u8?cmd=videoPlayerCdn&expires=1785560124152&sig=ss0c6pi83lQ'
+  );
+
+  // Singly-escaped payloads and the other separators JSON hides the same way.
+  assert.strictEqual(
+    cleanEscapedStreamUrl('https://h.example/a.m3u8?x=1\\u0026y=2\\u003d3'),
+    'https://h.example/a.m3u8?x=1&y=2=3'
+  );
+
+  // A URL that never carried an escape is returned untouched, so this cannot
+  // rewrite the hosts that were already working.
+  const plain = 'https://vd468.okcdn.ru/expires/1785560107895/ondemand/hls4_450645.m3u8/';
+  assert.strictEqual(cleanEscapedStreamUrl(plain), plain);
+  assert.strictEqual(
+    cleanEscapedStreamUrl('https://h.example/v.mp4?a=1&b=2'),
+    'https://h.example/v.mp4?a=1&b=2'
+  );
+
+  // And the repair reaches the extractor, not just the helper.
+  assert.strictEqual(
+    extractDirectStream(
+      '<script>var p = "{\\"hlsManifestUrl\\":\\"https://vd238.okcdn.ru/video.m3u8?cmd=videoPlayerCdn\\\\u0026sig=abc\\"}";</script>',
+      'https://www.ok.ru/videoembed/1'
+    ),
+    'https://vd238.okcdn.ru/video.m3u8?cmd=videoPlayerCdn&sig=abc'
+  );
+}
+
 async function run() {
   const tests = [
+    ['Escaped stream URL repair', testEscapedStreamUrlRepair],
     ['VOE payload decodes', testVoePayloadDecodes],
     ['VOE decode rejects unrelated pages', testVoeDecodeRejectsUnrelatedPages],
     ['VOE mirror recognised by payload', testVoeMirrorIsRecognisedByPayload],

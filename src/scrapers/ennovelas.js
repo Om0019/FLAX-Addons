@@ -7,7 +7,10 @@ const BASE_URL = 'https://l.ennovelas-tv.com';
 const SEARCH_TIMEOUT_MS = 4500;
 const PAGE_TIMEOUT_MS = 5500;
 const PLAYER_CONCURRENCY = 3;
-const MAX_DIRECT_PROBES = 4;
+// Each miss costs about 600ms against the 10s a scraper gets, and the search
+// fallback still needs room, so this buys the season-specific shapes below
+// without crowding it out.
+const MAX_DIRECT_PROBES = 5;
 
 function browserHeaders(userAgent, extra = {}) {
   return {
@@ -66,15 +69,25 @@ function titleWithoutEpisode(value) {
     .trim();
 }
 
-function scoreEpisodeCandidate(result, query, originalTitle, extraTitles = []) {
+function scoreEpisodeCandidate(result, query, originalTitle, extraTitles = [], season = null) {
   const cleanQuery = cleanText(query);
   const cleanOriginal = cleanText(originalTitle);
+  const slugText = result.url.match(/\/([^/?#]+)\/?$/)?.[1]?.replace(/-/g, ' ');
   const cleanResultTitle = cleanText(titleWithoutEpisode(result.title));
-  const cleanSlugTitle = cleanText(titleWithoutEpisode(
-    result.url.match(/\/([^/?#]+)\/?$/)?.[1]?.replace(/-/g, ' ')
-  ));
+  const cleanSlugTitle = cleanText(titleWithoutEpisode(slugText));
   const cleanExtras = extraTitles.map(cleanText).filter(Boolean);
+
+  // A show's episode numbering restarts every season, so a result that names a
+  // different season than the one asked for is the same episode number from the
+  // wrong run of the show — not a weaker match, a wrong one. "40 y 20" is the case
+  // that exposed this: its title ends in a number, so the season is never appended
+  // to the query, and a search for season 7 episode 12 scored the season 1 page
+  // exactly as highly as the season 7 one and picked whichever came first.
+  const resultSeason = seasonFromText(`${result.title} ${slugText || ''}`);
+  if (season && resultSeason && resultSeason !== Number(season)) return -1;
+
   let score = 0;
+  if (season && resultSeason === Number(season)) score += 6;
 
   if (cleanQuery && cleanResultTitle === cleanQuery) score += 8;
   if (cleanQuery && cleanSlugTitle === cleanQuery) score += 8;
@@ -92,12 +105,55 @@ function scoreEpisodeCandidate(result, query, originalTitle, extraTitles = []) {
   return score;
 }
 
+/**
+ * The two URL shapes every stem is tried in. Counted over the site's own sitemap
+ * (9000 episode slugs): 8997 are `<stem>-capitulo-<n>` and 94 of those end in
+ * `-final`, which is why the last episode of a run needs its own candidate.
+ *
+ * `-episodio-<n>` used to be probed here and has been dropped: the sitemap
+ * contains zero of them, so it never matched anything and only spent a slot out
+ * of the probe budget that the season shapes below now use.
+ */
 function episodeUrlCandidates(slug, episode) {
   return [
     `${BASE_URL}/${slug}-capitulo-${episode}/`,
-    `${BASE_URL}/${slug}-capitulo-${episode}-final/`,
-    `${BASE_URL}/${slug}-episodio-${episode}/`
+    `${BASE_URL}/${slug}-capitulo-${episode}-final/`
   ];
+}
+
+/**
+ * Slug stems for a specific season. The site writes a season into the slug three
+ * different ways, and the plain title is not one of them — for a multi-season show
+ * `<slug>-capitulo-<n>` is either a 404 or, worse, the same episode number from a
+ * different season. Frequencies over the same 9000 slugs:
+ *
+ *   <slug>-<season>-temporada-capitulo-<n>   967
+ *   <slug>-<season>-capitulo-<n>             522   (via the season-augmented query)
+ *   <slug>-temporada-<season>-capitulo-<n>   112
+ *
+ * The bare-number form arrives already slugged from buildSearchTitles, so only the
+ * two "temporada" spellings are built here.
+ *
+ * Season 1 gets them too. A show that numbers its seasons in the slug numbers the
+ * first one as well — `40-y-20-temporada-1-capitulo-13` is a live page while the
+ * plain `40-y-20-capitulo-13` is a 404 — and search cannot rescue that case: the
+ * site returns one page of results, newest season first, so season 1 of a
+ * nine-season show is never on it. The caller decides the order, and puts these
+ * behind the plain stem when the season is 1.
+ */
+function seasonSlugStems(baseSlug, season) {
+  if (!baseSlug || !(season >= 1)) return [];
+  return [
+    `${baseSlug}-${season}-temporada`,
+    `${baseSlug}-temporada-${season}`
+  ];
+}
+
+/** The season a result names, or null when it names none. */
+function seasonFromText(value) {
+  const text = String(value || '');
+  const match = text.match(/temporada[\s._-]*(\d+)/i) || text.match(/(\d+)[\s._-]*temporada/i);
+  return match ? parseInt(match[1], 10) : null;
 }
 
 function isEpisodePage(html, episode) {
@@ -162,17 +218,48 @@ function extractEpisodeResults(html) {
 async function findEpisodeUrl(title, originalTitle, season, episode, userAgent, signal, extraTitles = []) {
   const queries = buildSearchTitles(title, originalTitle, season, extraTitles);
 
-  let probesLeft = MAX_DIRECT_PROBES;
-  for (const query of queries) {
-    const slug = slugifyTitle(query);
-    if (!slug) continue;
+  const seasonStems = [];
+  const plainStems = [];
 
-    for (const url of episodeUrlCandidates(slug, episode)) {
-      if (probesLeft <= 0) break;
-      probesLeft -= 1;
-      const html = await fetchPageOk(url, userAgent, signal, episode);
-      if (html) return { url, html };
-    }
+  for (const baseTitle of [title, originalTitle, ...extraTitles]) {
+    // Deliberately the unaugmented title: slugifying "40 y 20" and stripping a
+    // trailing number to find the base would leave "40 y", so the base has to come
+    // from the title as given rather than from a query built out of it.
+    seasonStems.push(...seasonSlugStems(slugifyTitle(baseTitle), season));
+  }
+  for (const query of queries) plainStems.push(slugifyTitle(query));
+
+  // Past season 1 the season-specific stems lead, because the plain slug is then
+  // either a 404 or another season's episode with the same number. At season 1 the
+  // plain slug is the overwhelming majority — 8997 of the site's 9000 episodes —
+  // so it goes first and the season shapes back it up.
+  const orderedStems = season > 1
+    ? [...seasonStems, ...plainStems]
+    : [...plainStems, ...seasonStems];
+
+  const stems = [];
+  const seenStems = new Set();
+  for (const stem of orderedStems) {
+    if (!stem || seenStems.has(stem)) continue;
+    seenStems.add(stem);
+    stems.push(stem);
+  }
+
+  // Every stem's plain form is tried before any stem's "-final" form: only 94 of
+  // the site's 9000 episodes end a run, so a "-final" probe is far likelier to be
+  // a wasted slot than a hit.
+  const candidateUrls = stems.flatMap((stem) => episodeUrlCandidates(stem, episode));
+  const orderedUrls = [
+    ...candidateUrls.filter((url) => !url.endsWith('-final/')),
+    ...candidateUrls.filter((url) => url.endsWith('-final/'))
+  ];
+
+  let probesLeft = MAX_DIRECT_PROBES;
+  for (const url of orderedUrls) {
+    if (probesLeft <= 0) break;
+    probesLeft -= 1;
+    const html = await fetchPageOk(url, userAgent, signal, episode);
+    if (html) return { url, html };
   }
 
   async function runQuery(query) {
@@ -188,7 +275,7 @@ async function findEpisodeUrl(title, originalTitle, season, episode, userAgent, 
       let bestScore = 0;
       for (const result of extractEpisodeResults(html)) {
         if (episodeNumberFromText(`${result.title} ${result.url}`) !== Number(episode)) continue;
-        const score = scoreEpisodeCandidate(result, query, originalTitle, [title, ...extraTitles]);
+        const score = scoreEpisodeCandidate(result, query, originalTitle, [title, ...extraTitles], season);
         if (score > bestScore) {
           bestMatch = result;
           bestScore = score;
@@ -238,14 +325,45 @@ function extractPostWrapperUrls(value) {
   return urls;
 }
 
+/**
+ * Repairs the two malformed player URLs this source publishes.
+ *
+ * The wrapper payloads carry a doubled embed prefix on a share of their uqload
+ * links — `/embed-embed-<id>.html`, which is a 404 every time, while the same id
+ * at `/embed-<id>.html` serves the stream. It was 7 of the 22 uqload.co links in a
+ * 40-novela sample, and none of those 22 resolved before this.
+ *
+ * VK is also given both as the embed endpoint and as a watch page
+ * (`/video<oid>_<id>`). Only the embed endpoint serves a player, so the watch form
+ * is rewritten to it rather than followed to a page with no config in it.
+ */
+function normalizePlayerUrl(url) {
+  let normalized = url.replace(/\/embed-(?:embed-)+/i, '/embed-');
+
+  try {
+    const parsed = new URL(normalized);
+    const watchMatch = /(^|\.)vk\.com$/i.test(parsed.hostname)
+      && parsed.pathname.match(/^\/video(-?\d+)_(\d+)/);
+    if (watchMatch) {
+      normalized = `${parsed.origin}/video_ext.php?oid=${watchMatch[1]}&id=${watchMatch[2]}`;
+    }
+  } catch {
+    // Leave anything that will not parse to isPlayableCandidate to reject.
+  }
+
+  return normalized;
+}
+
 function extractPlayerUrls(html, pageUrl) {
   const $ = cheerio.load(html || '');
   const urls = [];
   const seen = new Set();
 
   function addUrl(value) {
-    const url = normalizeUrl(value, pageUrl);
-    if (!url || seen.has(url) || !isPlayableCandidate(url)) return;
+    const normalized = normalizeUrl(value, pageUrl);
+    if (!normalized) return;
+    const url = normalizePlayerUrl(normalized);
+    if (seen.has(url) || !isPlayableCandidate(url)) return;
     seen.add(url);
     urls.push(url);
   }
@@ -358,8 +476,11 @@ module.exports = {
     extractPlayerUrls,
     extractPostWrapperUrls,
     isPlayableCandidate,
+    normalizePlayerUrl,
     playerLabel,
     scoreEpisodeCandidate,
+    seasonFromText,
+    seasonSlugStems,
     slugifyTitle,
     titleWithoutEpisode
   }
