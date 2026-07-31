@@ -230,6 +230,27 @@ function isNetuFamilyHost(value) {
     || /(^|\.)novelas360\.cyou$/i.test(host);
 }
 
+/**
+ * Hosts that still resolve in DNS but accept no connections, so a request to one
+ * can only ever end in a timeout. Fembed closed in 2022 and GoUnlimited before
+ * it; both names now point at parked addresses that answer nothing. Measured over
+ * three consecutive trials each, every request burned the full deadline
+ * (6001-6006ms against a 6000ms budget) before failing — spent inside a scrape
+ * that has about ten seconds in total, and spent on a host that cannot answer.
+ *
+ * This is deliberately a list of hosts that answer *nothing*, not hosts that
+ * answer badly. A 403 or a 503 already costs one fast round trip and returns at
+ * the `res.ok` check in resolvePlayerStream, so there is nothing to save there,
+ * and a host that merely blocks some requests must keep its chance to serve the
+ * rest: hqq.tv answered 200, 403 and 200 across three consecutive trials, and
+ * listing it here would throw away the two that worked.
+ */
+const DEFUNCT_HOST_PATTERN = /^(?:www\.)?(?:fembed\.com|gounlimited\.to)$/i;
+
+function isDefunctHost(value) {
+  return DEFUNCT_HOST_PATTERN.test(getHostname(value));
+}
+
 function isNuploadHost(value) {
   const host = getHostname(value);
   return /(^|\.)n(?:u)?upload\.(?:top|me)$/i.test(host);
@@ -1151,6 +1172,11 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
     }
     visited.add(url);
 
+    if (isDefunctHost(url)) {
+        console.log(`Unpacker: Skipping ${getHostname(url)}, which accepts no connections`);
+        return null;
+    }
+
     try {
         // Pelisplus SPA players (upns, 4meplayer, strp2p, rpmstream)
         if (isPelisplusHost(url)) {
@@ -1362,6 +1388,7 @@ async function resolveDownloadUrl(url, userAgent, referer, options = {}) {
 module.exports = {
   __test: {
     decodeVidguardSignature,
+    isDefunctHost,
     isDoodHost,
     decryptFilemoonPayload,
     extractAssignedRedirect,
