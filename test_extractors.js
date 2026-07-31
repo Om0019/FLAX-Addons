@@ -15,6 +15,7 @@ const {
   extractStreamtapeStream,
   extractVidguardStream,
   extractVoeDirectStream,
+  isDefunctHost,
   isPelisplusHost,
   isStreamtapeHost,
   isSupportedEmbedServer,
@@ -620,6 +621,38 @@ function testPelisplusHostRecognition() {
   assert.strictEqual(isPelisplusHost('https://goodstream.one/embed-abc.html'), false);
 }
 
+/**
+ * The skip covers hosts that answer nothing at all, so it must not spread to the
+ * ones that merely answer badly some of the time — hqq.tv served 200, 403 and 200
+ * across three consecutive trials, and a host like that has to keep its turn.
+ */
+async function testDefunctHostSkip() {
+  assert.strictEqual(isDefunctHost('https://fembed.com/v/abc'), true);
+  assert.strictEqual(isDefunctHost('https://www.fembed.com/v/abc'), true);
+  assert.strictEqual(isDefunctHost('https://gounlimited.to/e/abc'), true);
+
+  for (const live of [
+    'https://hqq.tv/e/abc',
+    'https://waaw.to/e/abc',
+    'https://novelas360.cyou/e/abc',
+    'https://gamovideo.com/e/abc'
+  ]) {
+    assert.strictEqual(isDefunctHost(live), false, `${live} still answers and must be tried`);
+  }
+
+  // A defunct name appearing inside another host is a different host.
+  assert.strictEqual(isDefunctHost('https://fembed.com.example.net/v/abc'), false);
+  assert.strictEqual(isDefunctHost('https://notfembed.com/v/abc'), false);
+
+  // Resolving one returns without reaching the network at all, which is what
+  // keeps the timeout off the scrape's budget. An attempted fetch here would
+  // hang for the full deadline rather than come back null.
+  const started = Date.now();
+  const resolved = await resolvePlayerStream('https://fembed.com/v/abc', userAgent, 'https://example.com/');
+  assert.strictEqual(resolved, null);
+  assert.ok(Date.now() - started < 1000, 'defunct host must be skipped without a request');
+}
+
 async function run() {
   const tests = [
     ['VOE payload decodes', testVoePayloadDecodes],
@@ -640,7 +673,8 @@ async function run() {
     ['embed69 ranks challenge-gated hosts last', testEmbed69RanksFilemoonLast],
     ['Streamtape split URL extraction', testStreamtapeExtraction],
     ['Assigned-variable redirect extraction', testAssignedRedirectExtraction],
-    ['Pelisplus host recognition', testPelisplusHostRecognition]
+    ['Pelisplus host recognition', testPelisplusHostRecognition],
+    ['Defunct hosts are skipped before any request', testDefunctHostSkip]
   ];
 
   for (const [label, test] of tests) {
