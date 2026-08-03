@@ -9,22 +9,17 @@
  * Torrentio itself aggregates torrents in whatever language(s) the release
  * happens to carry, most of it not Spanish, so results are filtered down to
  * ones that look Spanish/Latino before being handed back — this addon is
- * Spanish-only. (english-addon/ uses the same vendored file, Spanish-
- * filtering skipped, cached-only filtering applied the same way.)
+ * Spanish-only. (english-addon/ uses the same vendored file with language
+ * filtering skipped.)
  *
- * A torrent that isn't cached on the configured debrid service means
- * playback would have to wait for it to download first, so uncached results
- * are dropped entirely rather than shown - this is the only scraper here
- * where that concept applies, since every other source hands back a direct
- * link that either plays or doesn't. Only TorBox is wired up for the cache
- * check right now (see ../torbox-cache.js): if a different debrid provider
- * is configured, or the check itself fails, everything is dropped rather
- * than risk showing something unplayable.
+ * Cache-only filtering is intentionally not re-implemented here. Torrentio's
+ * own backend already scopes by debrid config; a second local TorBox cache
+ * check was redundant and could fail-closed to zero results when TorBox's
+ * checkcached endpoint had auth/outage issues.
  */
 
 const vendoredTorrentio = require('../vendor/torrentio');
 const { configureTorrentioSettings } = require('../torrentio-settings');
-const { checkTorboxCached } = require('../torbox-cache');
 
 configureTorrentioSettings();
 
@@ -50,26 +45,13 @@ function toInternalStream(raw) {
     name: 'Torrentio',
     title: raw.title || raw.name || 'Torrentio',
     url: raw.url,
-    // Every stream reaching this point already passed the cache check.
+    // Cached status is determined upstream by Torrentio/debrid config.
     __cached: true,
     behaviorHints: {
       notWebReady: true,
       ...(headers ? { proxyHeaders: { request: headers } } : {})
     }
   };
-}
-
-/** Drops every stream that isn't confirmed cached on the configured debrid service. */
-async function filterCachedOnly(streams) {
-  const settings = global.SCRAPER_SETTINGS || {};
-  if (settings.debridProvider !== 'torbox' || !settings.debridKey) {
-    console.warn('Torrentio: no TorBox key configured; cannot verify cache status, dropping all results.');
-    return [];
-  }
-
-  const hashes = streams.map((stream) => stream.infoHash).filter(Boolean);
-  const cachedHashes = await checkTorboxCached(hashes, settings.debridKey);
-  return streams.filter((stream) => stream.infoHash && cachedHashes.has(stream.infoHash.toLowerCase()));
 }
 
 async function scrape(title, originalTitle, year, type, season, episode, options = {}) {
@@ -84,11 +66,10 @@ async function scrape(title, originalTitle, year, type, season, episode, options
   try {
     const rawStreams = await vendoredTorrentio.getStreams(tmdbId, mediaType, season, episode);
     const spanishStreams = (rawStreams || []).filter(isSpanishLanguageStream);
-    const cachedSpanishStreams = await filterCachedOnly(spanishStreams);
 
-    console.log(`Torrentio: ${rawStreams?.length || 0} stream(s) total, ${spanishStreams.length} Spanish/Latino, ${cachedSpanishStreams.length} cached`);
+    console.log(`Torrentio: ${rawStreams?.length || 0} stream(s) total, ${spanishStreams.length} Spanish/Latino`);
 
-    return cachedSpanishStreams.map(toInternalStream).filter((stream) => Boolean(stream.url));
+    return spanishStreams.map(toInternalStream).filter((stream) => Boolean(stream.url));
   } catch (error) {
     console.error(`Torrentio scrape error for tmdbId ${tmdbId}:`, error.message);
     return [];
