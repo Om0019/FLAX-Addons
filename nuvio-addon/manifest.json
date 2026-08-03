@@ -1,0 +1,19 @@
+{
+  "name": "Latino (SoloLatino) Nuvio Providers",
+  "version": "1.0.0",
+  "scrapers": [
+    {
+      "id": "SoloLatino",
+      "name": "SoloLatino",
+      "description": "Spanish-dubbed/subtitled movies and series scraped from sololatino.net",
+      "version": "1.0.0",
+      "author": "Ported from the Latino Stremio addon",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/sololatino.js",
+      "enabled": true,
+      "formats": ["mp4", "mkv"],
+      "logo": "",
+      "contentLanguage": ["es"]
+    }
+  ]
+}
