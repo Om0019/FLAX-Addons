@@ -9,6 +9,7 @@ const pelispedia = require('./pelispedia');
 const tlnovelas = require('./tlnovelas');
 const novelas360 = require('./novelas360');
 const ennovelas = require('./ennovelas');
+const torrentio = require('./torrentio');
 const { fetchTextWithTimeout, normalizeUrl } = require('../http');
 const { hasBlockedIpLiteralHost } = require('../net-guard');
 const { createTtlCache } = require('../ttl-cache');
@@ -24,6 +25,10 @@ const {
 
 const SCRAPER_TIMEOUT_MS = 10000;
 const SOLOLATINO_TIMEOUT_MS = 12000;
+// Torrentio's own debrid-resolution round trip runs behind whatever debrid
+// provider is configured, on top of its own torrent-indexer lookup, so it
+// gets a longer budget than the HTML scrapers.
+const TORRENTIO_TIMEOUT_MS = 12000;
 const SCRAPER_COLLECTION_TIMEOUT_MS = 11500;
 const EMPTY_RESULT_GRACE_MS = 3500;
 // Return as soon as this many sources have produced this many streams between
@@ -531,9 +536,9 @@ function resolveWithin(promise, timeoutMs, fallbackValue) {
   return Promise.race([promise, fallback]).finally(() => clearTimeout(timeoutId));
 }
 
-function createScraperTask(scraper, label, args, timeoutMs, extraTitles = []) {
+function createScraperTask(scraper, label, args, timeoutMs, extraTitles = [], extraOptions = {}) {
   const controller = new AbortController();
-  const promise = scraper.scrape(...args, { signal: controller.signal, extraTitles });
+  const promise = scraper.scrape(...args, { signal: controller.signal, extraTitles, ...extraOptions });
   return {
     name: label,
     promise: withTimeout(promise, timeoutMs, label, () => controller.abort()),
@@ -1184,7 +1189,8 @@ async function getStreamsUncached(type, id, season, episode) {
       createScraperTask(pelispedia, 'PelisPedia', buildScraperArgs('PelisPedia', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
       createScraperTask(tlnovelas, 'TLNovelas', buildScraperArgs('TLNovelas', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
       createScraperTask(novelas360, 'Novelas360', buildScraperArgs('Novelas360', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
-      createScraperTask(ennovelas, 'Ennovelas', buildScraperArgs('Ennovelas', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles)
+      createScraperTask(ennovelas, 'Ennovelas', buildScraperArgs('Ennovelas', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
+      createScraperTask(torrentio, 'Torrentio', buildScraperArgs('Torrentio', title, originalTitle, year, type, season, episode), TORRENTIO_TIMEOUT_MS, extraTitles, { tmdbId })
     ];
 
     if (ENABLE_CINEHDPLUS) {

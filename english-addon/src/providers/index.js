@@ -10,6 +10,9 @@
  */
 
 const path = require('path');
+const { configureTorrentioSettings } = require('../torrentio-settings');
+
+configureTorrentioSettings();
 
 const PROVIDER_TIMEOUT_MS = 15000;
 

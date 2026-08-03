@@ -31,10 +31,17 @@ zero results.
 
 **Torrentio** needs a debrid provider API key to return anything (it's a
 torrent-indexer front end; without a debrid account there's nothing to hand
-back as a direct stream). It's wired up and enabled — it just returns an
-empty list until that's configured. `providers/torrentio.js` reads its
-settings through `getDebridSettings()`; exactly how to feed it a key from
-outside Nuvio's app UI needs to be worked out once the key is available.
+back as a direct stream). `providers/torrentio.js` reads its config from
+`global.SCRAPER_SETTINGS` at call time — the same mechanism Nuvio's own
+settings UI uses to feed providers their per-user config — which
+`src/torrentio-settings.js` sets from `TORRENTIO_DEBRID_PROVIDER` /
+`TORRENTIO_DEBRID_KEY` env vars (defaulting to a TorBox key configured
+directly; see that file). In this dev sandbox, requests to
+`torrentio.strem.fun` came back `403` from Cloudflare regardless of the key —
+looked like the sandbox's outbound IP being blocked, not a config problem
+(the request itself was confirmed correctly formed: key included, right
+path). Worth re-testing once this is deployed somewhere with a normal
+residential/hosting IP.
 
 Verified end-to-end against the running server (`tt0137523` / Fight Club):
 35 streams back from 6 of 11 providers in ~5.8s. A series lookup

@@ -24,7 +24,7 @@ const manifest = {
   // Lists only the sources that actually run. CineHDPlus is behind a Cloudflare
   // managed challenge and is disabled (see scrapers/cinehdplus.js), so naming it
   // here promised Stremio users a source that can never return anything.
-  description: 'Películas y Series en Español Latino y Castellano directas de Cinecalidad, SoloLatino, TioPlus, Cuevana3i, LaMovie, PelisPedia, TLNovelas y Novelas360.',
+  description: 'Películas y Series en Español Latino y Castellano directas de Cinecalidad, SoloLatino, TioPlus, Cuevana3i, LaMovie, PelisPedia, TLNovelas, Novelas360 y Torrentio (audio Latino).',
   logo: 'https://images.unsplash.com/photo-1574267431422-7bda297781f5?q=80&w=256&auto=format&fit=crop',
   background: 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?q=80&w=1280&auto=format&fit=crop',
   types: ['movie', 'series'],
