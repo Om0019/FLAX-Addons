@@ -6,6 +6,11 @@ const scrapers = require('./scrapers');
 const { fetchTextWithTimeout, fetchWithTimeout } = require('./http');
 const { BlockedAddressError, MAX_REDIRECT_HOPS, UnresolvableHostError, assertPublicUrl } = require('./net-guard');
 const { applyStreamTemplate } = require('./stream-template');
+// Mounted as a sub-app at /english below, so both addons are reachable from
+// one deployment (one URL, one port) and the landing page can link to both.
+// english-addon/ stays a fully independent, standalone-runnable addon on its
+// own otherwise (own package.json, own index.js) - this is additive.
+const englishAddonApp = require('../english-addon/src/server');
 
 const app = express();
 const PROXY_FETCH_TIMEOUT_MS = 8000;
@@ -450,6 +455,8 @@ const landingPageByOrigin = new Map();
 function renderLandingPage(protocol, host) {
   const manifestUrl = `${protocol}://${host}/manifest.json`;
   const stremioInstallUrl = `stremio://${host}/manifest.json`;
+  const englishManifestUrl = `${protocol}://${host}/english/manifest.json`;
+  const englishStremioInstallUrl = `stremio://${host}/english/manifest.json`;
 
   return `
 <!DOCTYPE html>
@@ -805,6 +812,27 @@ function renderLandingPage(protocol, host) {
     </div>
 
     <div class="glass-card">
+      <h2 class="card-title">English Streams</h2>
+
+      <div class="actions">
+        <a href="${englishStremioInstallUrl}" class="btn-primary">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 4V20M20 12H4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Install on Stremio
+        </a>
+
+        <p style="text-align: center; font-size: 0.9rem; color: var(--text-muted);">
+          Doesn't open automatically? Copy the manifest link below and paste it into Stremio's search bar.
+        </p>
+
+        <div class="manifest-box">
+          <input type="text" class="manifest-input" value="${englishManifestUrl}" readonly onclick="this.select(); document.execCommand('copy'); alert('Manifest link copied!');">
+        </div>
+      </div>
+    </div>
+
+    <div class="glass-card">
       <h2 class="card-title">Fuentes Integradas</h2>
       
       <div class="grid-providers">
@@ -901,5 +929,7 @@ app.__test = {
   proxiedStreamUrl,
   rewriteHlsManifest
 };
+
+app.use('/english', englishAddonApp);
 
 module.exports = app;
