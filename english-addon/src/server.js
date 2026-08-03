@@ -11,7 +11,7 @@ app.use(cors());
 const MANIFEST = {
   id: 'org.stremio.english-addon',
   version: '1.0.0',
-  name: 'English Streams',
+  name: 'English',
   description: `English-language movies and TV, aggregated from: ${PROVIDERS.map((p) => p.name).join(', ')}`,
   resources: ['stream'],
   types: ['movie', 'series'],
