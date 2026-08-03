@@ -125,14 +125,21 @@ function isKnownBadStream(stream) {
   const url = (stream.url || '').toLowerCase();
   const title = (stream.title || '').toLowerCase();
   const name = (stream.name || '').toLowerCase();
+  // Torrentio's TorBox integration returns an authenticated HTTPS resolver URL,
+  // not a magnet/torrent file. It is safe to keep when the source already
+  // established it as cached; generic Torrentio/P2P results remain blocked.
+  const isCachedTorboxResolver = stream.__cached === true
+    && /^https:\/\/torrentio\.strem\.fun\/resolve\/torbox\//.test(url);
   return url.includes('test-videos.co.uk')
     || url.includes('big_buck_bunny')
     || url.includes('magnet:')
     || url.includes('.torrent')
     || url.includes('strp2p.com')
-    || title.includes('p2p')
-    || title.includes('torrent')
-    || name.includes('torrent');
+    || (!isCachedTorboxResolver && (
+      title.includes('p2p')
+      || title.includes('torrent')
+      || name.includes('torrent')
+    ));
 }
 
 function getHostHealth(host) {
@@ -420,6 +427,7 @@ async function collectScraperResults(tasks, timeoutMs, onResult, options = {}) {
   let sourcesRequired = FAST_SOURCE_MIN_SOURCES;
   let deadlinePassed = false;
   let resolveFastReturn;
+  const requiredNames = new Set(options.requiredNames || []);
 
   // How many streams the eager probes have actually confirmed playable so far.
   // Counting raw streams alone is what made an early return worth so little: the
@@ -429,6 +437,12 @@ async function collectScraperResults(tasks, timeoutMs, onResult, options = {}) {
   const getConfirmedCount = options.getConfirmedCount || (() => 0);
 
   const hasEnoughStreamsForFastReturn = () => {
+    // Cached Torrentio streams are the addon's only debrid-backed source. Do
+    // not return a partial response before it has had a chance to report.
+    if (![...requiredNames].every((name) => results.some((result) => result.name === name))) {
+      return false;
+    }
+
     const fulfilledWithStreams = results.filter((result) => (
       result.status === 'fulfilled'
       && Array.isArray(result.value)
@@ -1211,7 +1225,11 @@ async function getStreamsUncached(type, id, season, episode) {
       scraperTasks,
       SCRAPER_COLLECTION_TIMEOUT_MS,
       (streams) => startEagerValidation(streams, validator),
-      { getConfirmedCount: () => validator.confirmed, gate: fastReturnGate }
+      {
+        getConfirmedCount: () => validator.confirmed,
+        gate: fastReturnGate,
+        requiredNames: ['Torrentio']
+      }
     );
 
     const countStreams = (results) => results.reduce((total, res) => (

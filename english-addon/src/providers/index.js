@@ -43,6 +43,55 @@ const loaded = PROVIDERS.map((entry) => {
   }
 }).filter(Boolean);
 
+// The vendored Torrentio adapter reformats its response and drops the upstream
+// `TB+` marker. Capture that marker while its request is in flight so the
+// result can still be filtered as an actual TorBox cache hit. This must be
+// serialized because the adapter reads the global fetch function.
+let torrentioRequestQueue = Promise.resolve();
+
+function isTorrentioCachedLabel(name) {
+  return /(?:^|[^A-Z0-9])TB\+(?:$|[^A-Z0-9])/i.test(name || '');
+}
+
+function queueTorrentioRequest(task) {
+  const result = torrentioRequestQueue.then(task, task);
+  torrentioRequestQueue = result.catch(() => {});
+  return result;
+}
+
+async function fetchTorrentioStreams(provider, tmdbId, mediaType, seasonNum, episodeNum) {
+  return queueTorrentioRequest(async () => {
+    const originalFetch = global.fetch;
+    let cacheStates = [];
+
+    global.fetch = async (...args) => {
+      const response = await originalFetch(...args);
+      const url = String(args[0]);
+      if (url.includes('torrentio.strem.fun/') && url.includes('/stream/')) {
+        const payload = await response.clone().json().catch(() => null);
+        cacheStates = Array.isArray(payload?.streams)
+          ? payload.streams.slice(0, 15).map((stream) => isTorrentioCachedLabel(stream.name))
+          : [];
+      }
+      return response;
+    };
+
+    try {
+      const streams = await withTimeout(
+        Promise.resolve(provider.module.getStreams(tmdbId, mediaType, seasonNum, episodeNum)),
+        PROVIDER_TIMEOUT_MS,
+        provider.id
+      );
+      return (Array.isArray(streams) ? streams : []).map((stream, index) => ({
+        ...stream,
+        __torrentioCached: cacheStates[index] === true
+      }));
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+}
+
 function withTimeout(promise, ms, label) {
   return Promise.race([
     promise,
@@ -58,7 +107,9 @@ function withTimeout(promise, ms, label) {
  * either plays or doesn't. Only TorBox is wired up for the cache check right
  * now (see ../torbox-cache.js): if a different debrid provider is
  * configured, or the check itself fails, everything is dropped rather than
- * risk showing something unplayable.
+ * risk showing something unplayable. Torrentio labels instant TorBox cache
+ * hits `TB+`; plain `TB` entries would first need TorBox to download them.
+ * The marker is captured before the vendored adapter reformats the response.
  */
 async function filterCachedTorrentioStreams(streams) {
   const settings = global.SCRAPER_SETTINGS || {};
@@ -70,7 +121,10 @@ async function filterCachedTorrentioStreams(streams) {
   const hashes = streams.map((stream) => stream.infoHash).filter(Boolean);
   const cachedHashes = await checkTorboxCached(hashes, settings.debridKey);
   return streams
-    .filter((stream) => stream.infoHash && cachedHashes.has(stream.infoHash.toLowerCase()))
+    .filter((stream) => (
+      (stream.infoHash && cachedHashes.has(stream.infoHash.toLowerCase())) ||
+      stream.__torrentioCached === true
+    ))
     .map((stream) => ({ ...stream, __cached: true }));
 }
 
@@ -82,11 +136,13 @@ async function filterCachedTorrentioStreams(streams) {
 async function fetchAllStreams(tmdbId, mediaType, seasonNum, episodeNum) {
   const attempts = loaded.map(async (provider) => {
     try {
-      let streams = await withTimeout(
-        Promise.resolve(provider.module.getStreams(tmdbId, mediaType, seasonNum, episodeNum)),
-        PROVIDER_TIMEOUT_MS,
-        provider.id
-      );
+      let streams = provider.id === 'torrentio'
+        ? await fetchTorrentioStreams(provider, tmdbId, mediaType, seasonNum, episodeNum)
+        : await withTimeout(
+          Promise.resolve(provider.module.getStreams(tmdbId, mediaType, seasonNum, episodeNum)),
+          PROVIDER_TIMEOUT_MS,
+          provider.id
+        );
       streams = Array.isArray(streams) ? streams : [];
       if (provider.id === 'torrentio') {
         streams = await filterCachedTorrentioStreams(streams);

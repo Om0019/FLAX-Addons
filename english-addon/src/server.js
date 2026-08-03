@@ -3,7 +3,7 @@ const cors = require('cors');
 const { findByImdbId } = require('./tmdb');
 const { PROVIDERS, fetchAllStreams } = require('./providers');
 const { extractContainer, extractResolution, formatStreamName, formatStreamDescription } = require('./stream-template');
-const { curateStreams } = require('./curate');
+const { curateStreams, resolutionTier } = require('./curate');
 
 const app = express();
 app.use(cors());
@@ -73,7 +73,19 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     const entries = results.flatMap(({ providerId, providerName, streams: providerStreams }) =>
       providerStreams.map((raw) => ({ providerId, providerName, raw, resolution: extractResolution(raw) }))
     );
-    const curated = curateStreams(entries);
+    // Torrentio is an additional cached-debrid option, not one of the two
+    // regular provider slots per resolution. Keep its first 4K and 1080p
+    // result, then curate all other providers independently at two distinct
+    // indexers per tier.
+    const torrentioEntries = entries.filter((entry) => entry.providerId === 'torrentio');
+    const torrentioCurated = ['2160p', '1080p'].flatMap((tier) => {
+      const stream = torrentioEntries.find((entry) => resolutionTier(entry.resolution) === tier);
+      return stream ? [stream] : [];
+    });
+    const curated = [
+      ...torrentioCurated,
+      ...curateStreams(entries.filter((entry) => entry.providerId !== 'torrentio'))
+    ];
     const streams = curated.map(({ raw, providerName }) => normalizeStream(raw, providerName));
 
     console.log(`English addon: ${imdbId} (${type}) -> ${streams.length} stream(s) (${entries.length} before curation) from ${results.filter((r) => r.streams.length > 0).length}/${results.length} providers`);
