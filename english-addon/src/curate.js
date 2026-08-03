@@ -14,16 +14,16 @@
  * needed - "priority with instant fallback" is just what this ranking does.
  *
  * Everything after it follows what was actually observed working:
- * hdhub4u/videasy/uhdmovies/4khdhubnew/castle/netmirror consistently
- * returned results in testing; vidsrc/vidfast/vidlink/allwish did not (in
- * this dev sandbox - that looked network-related rather than a real
- * pattern, so they're kept in rotation rather than dropped, just ranked
- * last).
+ * hdhub4u/uhdmovies/4khdhubnew/castle/netmirror consistently returned
+ * results in testing; videasy has been deprioritized due to reliability;
+ * vidsrc/vidfast/vidlink/allwish did not (in this dev sandbox - that looked
+ * network-related rather than a real pattern, so they're kept in rotation
+ * rather than dropped, just ranked last).
  */
 
 const PROVIDER_PRIORITY = [
-  'torrentio', 'hdhub4u', 'videasy', 'uhdmovies', '4khdhubnew', 'castle', 'netmirror',
-  'vidsrc', 'vidfast', 'vidlink', 'allwish'
+  'torrentio', 'hdhub4u', 'uhdmovies', '4khdhubnew', 'castle', 'netmirror',
+  'videasy', 'vidsrc', 'vidfast', 'vidlink', 'allwish'
 ];
 
 const PER_TIER_LIMIT = 2;
