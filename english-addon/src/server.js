@@ -3,6 +3,7 @@ const cors = require('cors');
 const { findByImdbId } = require('./tmdb');
 const { PROVIDERS, fetchAllStreams } = require('./providers');
 const { extractContainer, extractResolution, formatStreamName, formatStreamDescription } = require('./stream-template');
+const { curateStreams } = require('./curate');
 
 const app = express();
 app.use(cors());
@@ -69,11 +70,13 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     const mediaType = type === 'series' ? 'tv' : 'movie';
     const results = await fetchAllStreams(tmdb.id, mediaType, season, episode);
 
-    const streams = results.flatMap(({ providerName, streams: providerStreams }) =>
-      providerStreams.map((raw) => normalizeStream(raw, providerName))
+    const entries = results.flatMap(({ providerId, providerName, streams: providerStreams }) =>
+      providerStreams.map((raw) => ({ providerId, providerName, raw, resolution: extractResolution(raw) }))
     );
+    const curated = curateStreams(entries);
+    const streams = curated.map(({ raw, providerName }) => normalizeStream(raw, providerName));
 
-    console.log(`English addon: ${imdbId} (${type}) -> ${streams.length} stream(s) from ${results.filter((r) => r.streams.length > 0).length}/${results.length} providers`);
+    console.log(`English addon: ${imdbId} (${type}) -> ${streams.length} stream(s) (${entries.length} before curation) from ${results.filter((r) => r.streams.length > 0).length}/${results.length} providers`);
     res.json({ streams });
   } catch (error) {
     console.error(`English addon: stream lookup failed for ${id}:`, error.message);
