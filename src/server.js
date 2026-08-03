@@ -5,6 +5,7 @@ const { pipeline } = require('node:stream/promises');
 const scrapers = require('./scrapers');
 const { fetchTextWithTimeout, fetchWithTimeout } = require('./http');
 const { BlockedAddressError, MAX_REDIRECT_HOPS, UnresolvableHostError, assertPublicUrl } = require('./net-guard');
+const { applyStreamTemplate } = require('./stream-template');
 
 const app = express();
 const PROXY_FETCH_TIMEOUT_MS = 8000;
@@ -427,7 +428,8 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 
   try {
     const streams = await scrapers.getStreams(type, cleanId, season, episode);
-    const responseStreams = wrapProxyStreams(streams || [], req);
+    const templatedStreams = (streams || []).map((stream) => applyStreamTemplate(stream, manifest.name));
+    const responseStreams = wrapProxyStreams(templatedStreams, req);
     console.log(`Stream response: ${responseStreams.length} streams for ${type}/${cleanId}`);
     
     // If no streams found, return empty array (Stremio format)

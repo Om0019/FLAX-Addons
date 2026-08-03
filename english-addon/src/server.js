@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const { findByImdbId } = require('./tmdb');
 const { PROVIDERS, fetchAllStreams } = require('./providers');
+const { extractContainer, extractResolution, formatStreamName, formatStreamDescription } = require('./stream-template');
 
 const app = express();
 app.use(cors());
@@ -22,18 +23,18 @@ app.get('/manifest.json', (req, res) => {
 });
 
 function normalizeStream(raw, providerName) {
-  const title = [raw.title || raw.name, raw.quality && raw.quality !== 'Unknown' ? raw.quality : null]
-    .filter(Boolean)
-    .join(' - ');
-
   const behaviorHints = { notWebReady: true };
   if (raw.headers && Object.keys(raw.headers).length > 0) {
     behaviorHints.proxyHeaders = { request: raw.headers };
   }
 
   return {
-    name: providerName,
-    title: title || providerName,
+    name: formatStreamName(MANIFEST.name, raw.__cached === true),
+    title: formatStreamDescription({
+      indexer: providerName,
+      container: extractContainer(raw.url),
+      resolution: extractResolution(raw)
+    }),
     url: raw.url,
     behaviorHints
   };

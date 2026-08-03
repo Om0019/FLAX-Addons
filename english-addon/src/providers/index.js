@@ -11,6 +11,7 @@
 
 const path = require('path');
 const { configureTorrentioSettings } = require('../torrentio-settings');
+const { checkTorboxCached } = require('../torbox-cache');
 
 configureTorrentioSettings();
 
@@ -29,9 +30,6 @@ const PROVIDERS = [
   { id: '4khdhubnew', name: '4KHDHub', file: '4khdhubnew.js' },
   { id: 'hdhub4u', name: 'HDHub4u', file: 'hdhub4u.js' },
   { id: 'uhdmovies', name: 'UHDMovies', file: 'uhdmovies.js' },
-  // Needs a debrid API key configured before it returns anything; see
-  // README.md. Left enabled so it's a no-op (empty result, not an error)
-  // until that's wired up.
   { id: 'torrentio', name: 'Torrentio', file: 'torrentio.js' }
 ];
 
@@ -53,6 +51,30 @@ function withTimeout(promise, ms, label) {
 }
 
 /**
+ * A torrent that isn't cached on the configured debrid service means
+ * playback would have to wait for it to download first, so uncached results
+ * are dropped rather than shown - this is the only provider here where that
+ * concept applies, since every other source hands back a direct link that
+ * either plays or doesn't. Only TorBox is wired up for the cache check right
+ * now (see ../torbox-cache.js): if a different debrid provider is
+ * configured, or the check itself fails, everything is dropped rather than
+ * risk showing something unplayable.
+ */
+async function filterCachedTorrentioStreams(streams) {
+  const settings = global.SCRAPER_SETTINGS || {};
+  if (settings.debridProvider !== 'torbox' || !settings.debridKey) {
+    console.warn('Torrentio: no TorBox key configured; cannot verify cache status, dropping all results.');
+    return [];
+  }
+
+  const hashes = streams.map((stream) => stream.infoHash).filter(Boolean);
+  const cachedHashes = await checkTorboxCached(hashes, settings.debridKey);
+  return streams
+    .filter((stream) => stream.infoHash && cachedHashes.has(stream.infoHash.toLowerCase()))
+    .map((stream) => ({ ...stream, __cached: true }));
+}
+
+/**
  * Calls every loaded provider's getStreams in parallel, tolerating
  * individual failures/timeouts, and returns { providerId, providerName,
  * streams }[] for whichever came back with results.
@@ -60,12 +82,16 @@ function withTimeout(promise, ms, label) {
 async function fetchAllStreams(tmdbId, mediaType, seasonNum, episodeNum) {
   const attempts = loaded.map(async (provider) => {
     try {
-      const streams = await withTimeout(
+      let streams = await withTimeout(
         Promise.resolve(provider.module.getStreams(tmdbId, mediaType, seasonNum, episodeNum)),
         PROVIDER_TIMEOUT_MS,
         provider.id
       );
-      return { providerId: provider.id, providerName: provider.name, streams: Array.isArray(streams) ? streams : [] };
+      streams = Array.isArray(streams) ? streams : [];
+      if (provider.id === 'torrentio') {
+        streams = await filterCachedTorrentioStreams(streams);
+      }
+      return { providerId: provider.id, providerName: provider.name, streams };
     } catch (error) {
       console.warn(`Provider ${provider.id} failed:`, error.message);
       return { providerId: provider.id, providerName: provider.name, streams: [] };
