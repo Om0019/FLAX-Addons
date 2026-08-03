@@ -1,0 +1,24 @@
+{
+  "name": "english-addon",
+  "version": "1.0.0",
+  "description": "English-language Stremio addon, wrapping providers ported from the Nuvio All-in-One-Nuvio local-scraper repo",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --check index.js && node --check src/server.js && node --check src/tmdb.js && node --check src/providers/index.js && for f in providers/*.js; do node --check \"$f\" || exit 1; done"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "commonjs",
+  "dependencies": {
+    "cheerio": "^1.2.0",
+    "cheerio-without-node-native": "^0.20.2",
+    "cors": "^2.8.6",
+    "crypto-js": "^4.2.0",
+    "express": "^5.2.1"
+  }
+}
