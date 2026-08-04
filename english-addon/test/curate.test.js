@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { curateStreams, resolutionTier } = require('../src/curate');
+const { curateStreams, curateTorrentioStreams, resolutionTier } = require('../src/curate');
 
 const entry = (providerId, resolution) => ({ providerId, providerName: providerId, resolution });
 
@@ -78,4 +78,24 @@ test('resolutionTier treats an unlabeled resolution the same as a below-720p one
   assert.equal(resolutionTier(null), resolutionTier('480p'));
   assert.equal(resolutionTier(undefined), 'fallback');
   assert.equal(resolutionTier('Auto'), 'fallback');
+});
+
+// Regression: TorBox routinely confirms more than one cached release for the
+// same title (fifteen 2160p torrents was the observed count for a real
+// title), and the old logic kept exactly one per known tier - discarding
+// fourteen of them regardless of how many were genuinely instant.
+test('torrentio keeps multiple distinct releases in the same tier, up to its own limit', () => {
+  const entries = Array.from({ length: 7 }, () => entry('torrentio', '2160p'));
+
+  const selected = curateTorrentioStreams(entries);
+
+  assert.equal(selected.length, 5, 'capped at the torrentio-specific limit, not collapsed to one');
+});
+
+test('torrentio entries are ranked by resolution only, best first', () => {
+  const entries = [entry('torrentio', '1080p'), entry('torrentio', '2160p'), entry('torrentio', null)];
+
+  const selected = curateTorrentioStreams(entries);
+
+  assert.deepEqual(selected.map((item) => item.resolution), ['2160p', '1080p', null]);
 });
