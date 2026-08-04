@@ -3,8 +3,8 @@ const cors = require('cors');
 const { findByImdbId } = require('./tmdb');
 const { PROVIDERS, fetchAllStreams, diagnoseTorrentio } = require('./providers');
 const { extractContainer, extractResolution, formatStreamName, formatStreamDescription } = require('./stream-template');
-const { curateStreams, curationRunnersUp, resolutionTier } = require('./curate');
-const { STREAM_PROBE_TIMEOUT_MS, filterPlayableStreamsWithBackfill } = require('./stream-probe');
+const { curateStreams, resolutionTier } = require('./curate');
+const { STREAM_PROBE_TIMEOUT_MS, selectPlayableStreams } = require('./stream-probe');
 
 const app = express();
 app.use(cors());
@@ -140,29 +140,36 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     // regular provider slots per resolution. Keep its first 4K and 1080p
     // result, then curate all other providers independently at two distinct
     // indexers per tier.
-    const torrentioEntries = entries.filter((entry) => entry.providerId === 'torrentio');
-    const torrentioCurated = ['2160p', '1080p'].flatMap((tier) => {
-      const stream = torrentioEntries.find((entry) => resolutionTier(entry.resolution) === tier);
-      return stream ? [stream] : [];
-    });
-    const curated = [
-      ...torrentioCurated,
-      ...curateStreams(entries.filter((entry) => entry.providerId !== 'torrentio'))
-    ];
+    //
+    // Expressed as a function of the still-viable entries rather than computed
+    // once, because the probe below re-runs it after dropping dead links. That
+    // is what keeps the per-tier and per-provider limits — including Torrentio's
+    // one slot per tier here — true of the final response and not merely of the
+    // first guess at it.
+    const curate = (available) => {
+      const torrentioEntries = available.filter((entry) => entry.providerId === 'torrentio');
+      const torrentioCurated = ['2160p', '1080p'].flatMap((tier) => {
+        const stream = torrentioEntries.find((entry) => resolutionTier(entry.resolution) === tier);
+        return stream ? [stream] : [];
+      });
+      return [
+        ...torrentioCurated,
+        ...curateStreams(available.filter((entry) => entry.providerId !== 'torrentio'))
+      ];
+    };
+
     // Do not expose a link simply because its provider returned it. A bounded
-    // byte-range probe verifies the final, curated links (including their
-    // required request headers) before Stremio sees them — and refills from what
-    // curation set aside when a pick turns out to be dead, so a tier whose two
-    // candidates both fail does not vanish from the response.
-    const reserve = curationRunnersUp(entries, curated);
+    // byte-range probe verifies the curated links (including their required
+    // request headers) before Stremio sees them, and curation re-runs over what
+    // survived, so a tier whose candidates all fail is refilled from the same
+    // tier rather than left empty.
     const probeBudgetMs = deadlineAt - Date.now();
     const playable = probeBudgetMs >= MIN_PROBE_BUDGET_MS
-      ? await filterPlayableStreamsWithBackfill(curated, reserve, {
-        target: curated.length,
+      ? await selectPlayableStreams(entries, curate, {
         deadlineAt,
         timeoutMs: Math.min(STREAM_PROBE_TIMEOUT_MS, probeBudgetMs)
       })
-      : curated;
+      : curate(entries);
 
     if (probeBudgetMs < MIN_PROBE_BUDGET_MS) {
       console.warn(`English addon: ${imdbId} used its ${REQUEST_BUDGET_MS}ms budget before probing; returning curated streams unverified.`);

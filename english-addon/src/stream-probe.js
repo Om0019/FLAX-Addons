@@ -88,31 +88,56 @@ async function filterPlayableStreams(entries, options = {}) {
 }
 
 /**
- * Probes `entries`, and tops the survivors back up from `reserve` until either
- * `target` of them are playable or the reserve runs out.
+ * Curates, probes, and re-curates over what survived, until the selection stops
+ * changing or the budget runs out.
  *
- * Curation picks its candidates before anything is probed, so without this a
- * tier whose picks are both dead simply disappears from the response — even
- * when a lower-ranked provider had a working link that curation set aside. Each
- * round probes only as many replacements as were lost, so the common case where
- * everything works costs exactly what it did before.
+ * Curation picks its candidates before anything is probed, so a tier whose picks
+ * are all dead would otherwise vanish from the response even when a lower-ranked
+ * provider had a working link for it.
+ *
+ * Refilling that gap from a flat list of runners-up is the obvious approach and
+ * it is wrong: curation's rules — at most two per resolution tier, each from a
+ * different provider, fallback tiers only when no primary tier produced anything
+ * — hold only at the moment curation runs. A flat reserve is ordered across
+ * tiers, so a dead 2160p pair pulled its replacements from the 1080p leftovers
+ * and handed back four 1080p streams. Re-running `curate` over the survivors
+ * re-establishes every one of those rules by construction, including any the
+ * caller composes on top (Torrentio's one-per-tier slot), rather than
+ * re-implementing them here where they would drift.
+ *
+ * Verdicts are remembered by URL, so each link is probed at most once no matter
+ * how many rounds it survives into; a round that discovers no new candidates
+ * ends the loop, which also bounds it.
  */
-async function filterPlayableStreamsWithBackfill(entries, reserve, options = {}) {
-  const { target = entries.length, deadlineAt = Infinity } = options;
-  const queue = [...reserve];
-  const playable = await filterPlayableStreams(entries, options);
+async function selectPlayableStreams(entries, curate, options = {}) {
+  const { deadlineAt = Infinity, ...probeOptions } = options;
+  const verdictByUrl = new Map();
+  const dead = new Set();
 
-  while (playable.length < target && queue.length > 0 && Date.now() < deadlineAt) {
-    const replacements = queue.splice(0, target - playable.length);
-    playable.push(...await filterPlayableStreams(replacements, options));
+  for (;;) {
+    const selection = curate(entries.filter((entry) => !dead.has(entry)));
+    const unprobed = selection.filter((entry) => !verdictByUrl.has(entry.raw?.url));
+
+    // Nothing new to check, or no time left to check it: keep what has not been
+    // disproved. An unprobed stream is unverified, not known-bad.
+    if (unprobed.length === 0 || Date.now() >= deadlineAt) {
+      return selection.filter((entry) => verdictByUrl.get(entry.raw?.url) !== false);
+    }
+
+    await Promise.all(unprobed.map(async (entry) => {
+      const playable = await probeStream(entry.raw, probeOptions);
+      verdictByUrl.set(entry.raw?.url, playable);
+      if (!playable) {
+        console.warn(`English addon: dropping unreachable ${entry.providerId} stream`);
+        dead.add(entry);
+      }
+    }));
   }
-
-  return playable;
 }
 
 module.exports = {
   STREAM_PROBE_TIMEOUT_MS,
   probeStream,
   filterPlayableStreams,
-  filterPlayableStreamsWithBackfill
+  selectPlayableStreams
 };
