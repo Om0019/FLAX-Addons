@@ -332,7 +332,12 @@ function extractHubCloud(hubCloudUrl, baseMeta) {
       const href = $(el).attr("href");
       if (!href)
         return;
-      if (text.includes("10Gbps") || text.includes("PixelServer") || href.includes("hubcloud.cx")) {
+      // `href.includes("hubcloud.cx")` used to be enough on its own, which also
+      // matched the page's own "Login" link (https://hubcloud.cx/drive/admin).
+      // That produced one dead 10Gbps entry per download item - a third of
+      // everything this provider returned - and, being first in its tier, it was
+      // the entry curation picked. Match the download hosts, not the site.
+      if (text.includes("10Gbps") || text.includes("PixelServer") || /\/\/(?:pixel|gpdl)\.hubcloud\./.test(href)) {
         results.push({
           source: "HubCloud 10Gbps",
           url: href,

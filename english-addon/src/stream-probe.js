@@ -18,6 +18,21 @@ function clearlyNotMedia(contentType) {
   return /(?:text\/html|application\/(?:json|xml)|text\/plain)/i.test(contentType || '');
 }
 
+// An HLS playlist is text, and plenty of hosts label it `text/plain` rather
+// than `application/vnd.apple.mpegurl`. Content type alone would throw those
+// away as error pages, so before dropping a text response we look at what it
+// actually is: a playlist announces itself on its first line.
+const HLS_MAGIC = '#EXTM3U';
+
+async function looksLikeHlsPlaylist(response) {
+  try {
+    const text = await response.text();
+    return text.trimStart().startsWith(HLS_MAGIC);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Releases a probe's response body.
  *
@@ -53,8 +68,10 @@ async function probeStream(stream, { timeoutMs = STREAM_PROBE_TIMEOUT_MS } = {})
       }
 
       // If it returned an HTML page (like a Cloudflare block or error page), drop it
+      // - unless the "text" is in fact an HLS playlist, which is exactly what we
+      // wanted to find.
       if (clearlyNotMedia(contentType)) {
-        return false;
+        return await looksLikeHlsPlaylist(response);
       }
 
       // Otherwise, assume it's playable (many servers return 403/416 to probes but work in players)
@@ -108,15 +125,20 @@ async function filterPlayableStreams(entries, options = {}) {
  * Verdicts are remembered by URL, so each link is probed at most once no matter
  * how many rounds it survives into; a round that discovers no new candidates
  * ends the loop, which also bounds it.
+ *
+ * `shouldProbe` exempts entries whose playability a probe cannot establish.
+ * An exempt entry is never fetched and never recorded as dead, so it passes
+ * through curation untouched — the same treatment an unprobed stream gets when
+ * the budget runs out.
  */
 async function selectPlayableStreams(entries, curate, options = {}) {
-  const { deadlineAt = Infinity, ...probeOptions } = options;
+  const { deadlineAt = Infinity, shouldProbe = () => true, ...probeOptions } = options;
   const verdictByUrl = new Map();
   const dead = new Set();
 
   for (;;) {
     const selection = curate(entries.filter((entry) => !dead.has(entry)));
-    const unprobed = selection.filter((entry) => !verdictByUrl.has(entry.raw?.url));
+    const unprobed = selection.filter((entry) => !verdictByUrl.has(entry.raw?.url) && shouldProbe(entry));
 
     // Nothing new to check, or no time left to check it: keep what has not been
     // disproved. An unprobed stream is unverified, not known-bad.

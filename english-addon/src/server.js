@@ -2,8 +2,9 @@ const express = require('express');
 const cors = require('cors');
 const { findByImdbId } = require('./tmdb');
 const { PROVIDERS, fetchAllStreams, diagnoseTorrentio } = require('./providers');
-const { extractContainer, extractResolution, formatStreamName, formatStreamDescription } = require('./stream-template');
+const { extractResolution } = require('./stream-template');
 const { curateStreams, resolutionTier } = require('./curate');
+const { dedupeByUrl, isProbeable, normalizeStream } = require('./response');
 const { STREAM_PROBE_TIMEOUT_MS, selectPlayableStreams } = require('./stream-probe');
 
 const app = express();
@@ -19,6 +20,11 @@ const REQUEST_BUDGET_MS = 12000;
 // Below this there is no point starting another probe: it would abort on arrival
 // and, because a timed-out probe is kept rather than dropped, teach us nothing.
 const MIN_PROBE_BUDGET_MS = 400;
+// Held back from the provider phase so the probes always get a turn. Probing is
+// what keeps dead links out of the response, and it was the first thing to be
+// squeezed out whenever the providers ran long — exactly when a response is
+// most likely to contain something broken.
+const PROBE_RESERVE_MS = 2500;
 // Cap on Torrentio results with no resolution in their release title, kept
 // alongside the one 4K and one 1080p pick (4 Torrentio streams max).
 const TORRENTIO_UNKNOWN_RESOLUTION_LIMIT = 2;
@@ -83,40 +89,6 @@ app.get('/diagnostics/torrentio/:type/:id.json', async (req, res) => {
   }
 });
 
-/**
- * Two providers reaching the same CDN link is ordinary — several of these
- * resolve through shared hosts — and without this the same link was offered
- * twice, taking two of the viewer's slots to say one thing. First occurrence
- * wins, so the higher-ranked provider keeps the attribution.
- */
-function dedupeByUrl(entries) {
-  const seen = new Set();
-  return entries.filter((entry) => {
-    const url = entry.raw?.url;
-    if (!url || seen.has(url)) return false;
-    seen.add(url);
-    return true;
-  });
-}
-
-function normalizeStream(raw, providerName) {
-  const behaviorHints = { notWebReady: true };
-  if (raw.headers && Object.keys(raw.headers).length > 0) {
-    behaviorHints.proxyHeaders = { request: raw.headers };
-  }
-
-  return {
-    name: formatStreamName(providerName, raw.__cached === true),
-    title: formatStreamDescription({
-      language: 'English',
-      container: extractContainer(raw.url),
-      resolution: extractResolution(raw)
-    }),
-    url: raw.url,
-    behaviorHints
-  };
-}
-
 app.get('/stream/:type/:id.json', async (req, res) => {
   const { type } = req.params;
   const id = req.params.id;
@@ -134,7 +106,9 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     }
 
     const mediaType = type === 'series' ? 'tv' : 'movie';
-    const results = await fetchAllStreams(tmdb.id, imdbId, mediaType, season, episode);
+    const results = await fetchAllStreams(tmdb.id, imdbId, mediaType, season, episode, {
+      timeoutMs: deadlineAt - Date.now() - PROBE_RESERVE_MS
+    });
 
     const entries = dedupeByUrl(results.flatMap(({ providerId, providerName, streams: providerStreams }) =>
       providerStreams.map((raw) => ({ providerId, providerName, raw, resolution: extractResolution(raw) }))
@@ -176,6 +150,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     const playable = probeBudgetMs >= MIN_PROBE_BUDGET_MS
       ? await selectPlayableStreams(entries, curate, {
         deadlineAt,
+        shouldProbe: isProbeable,
         timeoutMs: Math.min(STREAM_PROBE_TIMEOUT_MS, probeBudgetMs)
       })
       : curate(entries);

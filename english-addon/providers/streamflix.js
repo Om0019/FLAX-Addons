@@ -18,6 +18,17 @@ let cache = {
 };
 const CACHE_TTL = 1000 * 60 * 5; // 5 minutes
 
+// The stream links carry the release filename, which is where the only honest
+// statement about resolution lives: `BrBa.S01E01.720p.BrRip.x264.400MB-Pahe.in.mkv`
+// is a 720p file no matter which mirror serves it. Labelling every premium
+// mirror 1080p and every standard one 720p by rule put 720p files into the
+// caller's 1080p slot; when the filename says nothing, so do we.
+function qualityFromLink(link) {
+  const match = String(link || '').match(/\b(2160p|4k|1080p|720p|480p|360p)\b/i);
+  if (!match) return null;
+  return match[1].toLowerCase() === '4k' ? '2160p' : match[1].toLowerCase();
+}
+
 // Helper function for HTTP requests
 function makeRequest(url, options = {}) {
   const defaultHeaders = {
@@ -98,12 +109,16 @@ function searchContent(title, year, mediaType) {
       const searchQuery = title.toLowerCase();
       const results = data.data.filter(item => {
         if (!item.moviename) return false;
-        
-        const itemTitle = item.moviename.toLowerCase();
-        const titleWords = searchQuery.split(/\s+/);
-        
+
+        // Whole words, not substrings. `includes` matched "It" inside
+        // "Bitter" and "Up" inside "Uptown", which is how a search could
+        // select a different film entirely and still look like a hit.
+        const itemWords = new Set(item.moviename.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+        const titleWords = searchQuery.split(/[^a-z0-9]+/).filter(Boolean);
+        if (titleWords.length === 0) return false;
+
         // Check if all words from search query are present in the item title
-        return titleWords.every(word => itemTitle.includes(word));
+        return titleWords.every(word => itemWords.has(word));
       });
 
       console.log(`[StreamFlix] Found ${results.length} search results`);
@@ -356,7 +371,7 @@ function processMovieStreams(movieData, config) {
         name: "StreamFlix",
         title: `${movieData.moviename} - Premium Quality`,
         url: streamUrl,
-        quality: "1080p",
+        quality: qualityFromLink(movieData.movielink),
         size: movieData.movieduration || "Unknown",
         type: 'direct',
         headers: {
@@ -375,7 +390,7 @@ function processMovieStreams(movieData, config) {
         name: "StreamFlix",
         title: `${movieData.moviename} - Standard Quality`,
         url: streamUrl,
-        quality: "720p",
+        quality: qualityFromLink(movieData.movielink),
         size: movieData.movieduration || "Unknown",
         type: 'direct',
         headers: {
@@ -414,7 +429,7 @@ function processTVStreams(tvData, config, seasonNum, episodeNum) {
                 name: "StreamFlix",
                 title: `${tvData.moviename} S${seasonNum}E${episodeNum} - ${episodeData.name}`,
                 url: streamUrl,
-                quality: "1080p",
+                quality: qualityFromLink(episodeData.link),
                 size: episodeData.runtime ? `${episodeData.runtime}min` : "Unknown",
                 type: 'direct',
                 headers: {
@@ -437,7 +452,7 @@ function processTVStreams(tvData, config, seasonNum, episodeNum) {
                   name: "StreamFlix",
                   title: `${tvData.moviename} S${season}E${epNum} - ${episodeData.name}`,
                   url: streamUrl,
-                  quality: "1080p",
+                  quality: qualityFromLink(episodeData.link),
                   size: episodeData.runtime ? `${episodeData.runtime}min` : "Unknown",
                   type: 'direct',
                   headers: {
@@ -458,7 +473,7 @@ function processTVStreams(tvData, config, seasonNum, episodeNum) {
           name: "StreamFlix",
           title: `${tvData.moviename} S${seasonNum}E${episodeNum} (Fallback)`,
           url: fallbackUrl,
-          quality: "720p",
+          quality: null,
           size: "Unknown",
           type: 'direct',
           headers: {
@@ -481,7 +496,7 @@ function processTVStreams(tvData, config, seasonNum, episodeNum) {
           name: "StreamFlix",
           title: `${tvData.moviename} S${seasonNum}E${episodeNum} (Fallback)`,
           url: fallbackUrl,
-          quality: "720p",
+          quality: null,
           size: "Unknown",
           type: 'direct',
           headers: {

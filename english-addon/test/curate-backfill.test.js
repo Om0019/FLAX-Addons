@@ -1,17 +1,18 @@
-// Curation picks its candidates before anything is probed, so a tier whose picks
-// are all dead used to disappear from the response even when a lower-ranked
-// provider had a working link that curation had set aside.
+// Curation picks its candidates before anything is probed, so a provider's
+// best-looking link dying used to remove that provider from the response
+// entirely, even when the same provider had a second, lower-resolution link
+// that was never given a chance.
 //
-// The first attempt at fixing that refilled from a flat list of runners-up, and
-// broke curation's own rules doing it: the reserve is ordered across tiers, so a
-// dead 2160p pair drew its replacements from the 1080p leftovers and returned
-// four 1080p streams against a per-tier limit of two. Re-curating over the
-// survivors is what keeps those rules true of the final response.
+// curateStreams collapses each provider to its single best entry, so a dead
+// top pick isn't simply gone - it's excluded from the next round's input,
+// and curateStreams recomputes each provider's best from what's left. That
+// re-run is what promotes a provider's own next-best link rather than
+// requiring a separate refill mechanism to reimplement the same rules twice.
 
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const test = require('node:test');
-const { curateStreams, resolutionTier } = require('../src/curate');
+const { curateStreams } = require('../src/curate');
 const { selectPlayableStreams } = require('../src/stream-probe');
 
 let server;
@@ -41,56 +42,44 @@ const entry = (providerId, resolution, path) => ({
 
 const curate = (available) => curateStreams(available);
 
-const countByTier = (selection) => selection.reduce((counts, item) => {
-  const tier = resolutionTier(item.resolution);
-  counts[tier] = (counts[tier] || 0) + 1;
-  return counts;
-}, {});
-
-test('a tier whose every pick is dead is refilled from its own tier', async () => {
+test('a dead top pick is replaced by a different provider, not left empty', async () => {
   const entries = [
     entry('hdhub4u', '1080p', '/dead1'),
     entry('uhdmovies', '1080p', '/dead2'),
     entry('castle', '1080p', '/good1'),
-    entry('netmirror', '1080p', '/good2')
+    entry('streamflix', '1080p', '/good2')
   ];
 
   const playable = await selectPlayableStreams(entries, curate, { deadlineAt: Date.now() + 8000 });
-  assert.deepEqual(playable.map((item) => item.providerId), ['castle', 'netmirror']);
+  assert.deepEqual(playable.map((item) => item.providerId), ['castle', 'streamflix']);
 });
 
-test('refilling never exceeds two per tier, even when a whole tier dies', async () => {
-  const entries = [
-    // Both 2160p picks are dead and there is no 2160p replacement…
-    entry('hdhub4u', '2160p', '/dead1'),
-    entry('uhdmovies', '2160p', '/dead2'),
-    // …while 1080p has more healthy candidates than it is allowed to use.
-    entry('hdhub4u', '1080p', '/good1'),
-    entry('uhdmovies', '1080p', '/good2'),
-    entry('castle', '1080p', '/good3'),
-    entry('netmirror', '1080p', '/good4'),
-    entry('vidsrc', '1080p', '/good5')
-  ];
-
-  const playable = await selectPlayableStreams(entries, curate, { deadlineAt: Date.now() + 8000 });
-
-  // The regression this guards: a flat reserve returned four 1080p streams here.
-  assert.deepEqual(countByTier(playable), { '1080p': 2 });
-});
-
-test('refilling keeps one provider per tier', async () => {
+test('a provider whose top pick dies is refilled from its own next-best resolution', async () => {
+  // hdhub4u offers both a 1080p and a 720p link for the same title.
+  // curateStreams keeps only the 1080p one initially - the 720p entry isn't
+  // even a candidate until the 1080p one is proven dead and excluded from
+  // the pool curateStreams re-runs over.
   const entries = [
     entry('hdhub4u', '1080p', '/dead1'),
-    // Same provider, second link in the same tier — must not take the free slot.
-    entry('hdhub4u', '1080p', '/good1'),
-    entry('castle', '1080p', '/good2'),
-    entry('netmirror', '1080p', '/good3')
+    entry('hdhub4u', '720p', '/good1')
+  ];
+
+  const playable = await selectPlayableStreams(entries, curate, { deadlineAt: Date.now() + 8000 });
+  assert.deepEqual(playable.map((item) => ({ providerId: item.providerId, resolution: item.resolution })),
+    [{ providerId: 'hdhub4u', resolution: '720p' }]);
+});
+
+test('a provider never contributes two entries at once, even mid-refill', async () => {
+  const entries = [
+    entry('hdhub4u', '1080p', '/dead1'),
+    entry('hdhub4u', '1080p', '/good1'), // same provider, same tier - a tiebreak, not two slots
+    entry('castle', '1080p', '/good2')
   ];
 
   const playable = await selectPlayableStreams(entries, curate, { deadlineAt: Date.now() + 8000 });
   const providers = playable.map((item) => item.providerId);
 
-  assert.equal(new Set(providers).size, providers.length, 'no provider appears twice in a tier');
+  assert.equal(new Set(providers).size, providers.length, 'no provider appears twice');
   assert.equal(playable.length, 2);
 });
 
@@ -149,6 +138,43 @@ test('each link is probed at most once across rounds', async () => {
     // /good1 survives round one and is re-selected in round two; its verdict is
     // remembered rather than re-fetched.
     assert.equal(probed.length, new Set(probed).size, 'no URL was probed twice');
+  } finally {
+    await new Promise((resolve) => countingServer.close(resolve));
+  }
+});
+
+// Torrentio's links are debrid resolve endpoints, not files: they take longer
+// to answer than any probe deadline we can afford, and a timed-out probe is
+// kept anyway. Probing them spent the whole budget to learn nothing, and the
+// budget it spent was the one the other providers' links needed.
+test('torrentio is never fetched and is kept regardless', async () => {
+  const probed = [];
+  const countingServer = http.createServer((req, res) => {
+    probed.push(req.url);
+    res.writeHead(404, { 'Content-Type': 'text/html' });
+    res.end('<html>gone</html>');
+  });
+  await new Promise((resolve) => countingServer.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${countingServer.address().port}`;
+
+  try {
+    const at = (providerId, path) => ({
+      providerId,
+      providerName: providerId,
+      resolution: '1080p',
+      raw: { url: `${base}${path}` }
+    });
+    const entries = [at('torrentio', '/resolve'), at('castle', '/dead')];
+
+    const playable = await selectPlayableStreams(entries, curate, {
+      deadlineAt: Date.now() + 8000,
+      shouldProbe: (item) => item.providerId !== 'torrentio'
+    });
+
+    assert.deepEqual(probed, ['/dead'], 'only the probeable link was fetched');
+    // Castle's link answered like a dead one and went; Torrentio's stands even
+    // though the same server would have failed it.
+    assert.deepEqual(playable.map((item) => item.providerId), ['torrentio']);
   } finally {
     await new Promise((resolve) => countingServer.close(resolve));
   }

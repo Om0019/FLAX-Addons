@@ -19,6 +19,9 @@ configureTorrentioSettings();
 
 const PROVIDER_TIMEOUT_MS = 8000;
 const TORRENTIO_TIMEOUT_MS = 6000;
+// Never wait so briefly that a healthy provider cannot finish; below this the
+// caller is better served by whatever has already arrived.
+const MIN_PROVIDER_TIMEOUT_MS = 1500;
 const TORRENTIO_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Stremio English Addon)',
   Accept: 'application/json'
@@ -26,10 +29,34 @@ const TORRENTIO_HEADERS = {
 
 // vixsrc.js was deliberately left out: a 1.1MB bundle pulling in sqlite/
 // worker_threads/http2, ~16s per call in testing, and returned nothing.
+//
+// Three more have been removed since, each for a reason established by
+// fetching what they hand back rather than by whether they return something:
+//
+//   vidlink  - its API marks every quality `"requiresProxy": true`, and hands
+//              out the raw bcdn*.hakunaymatata.com URL anyway, which the CDN
+//              refuses (426, HTML body) regardless of headers. vidlink's
+//              player bundle builds the real proxied URL as
+//                {proxy}/mp{path}?{sign,t}&headers={json}&host={origin}
+//              keeping only auth/expires/hash/key/sign/t/token from the
+//              original query (chunk 3922, module 5196). Reproducing that
+//              exactly does get further - past Cloudflare and into the
+//              proxy's own handler - but it still answers 427/428, so there
+//              is a further gate (session, cookie or IP reputation) this
+//              addon cannot satisfy.
+//   vidfast  - aborts every call at "Incomplete decryption config"; 0 streams
+//              on 4/4 titles tested. Its key material is stale, not its luck.
+//   vidsrc   - resolves its RCP server and then scrapes 0 streams; likewise
+//              0 on 4/4 titles.
+//
+// netmirror had the same shape of bug - its net27.cc path also says
+// `"mode":"proxy"`/`"direct":false` and points at the same refused CDN - but
+// it turned out fixable: providers/netmirror.js is no longer the
+// All-in-One-Nuvio original. It's a newer build (from yoruix/nuvio-providers)
+// that drops the net27.cc attempt and goes straight to a working fallback
+// path already present, but unreachable, in the original file. See that
+// file's docblock for how it was verified.
 const PROVIDERS = [
-  { id: 'vidsrc', name: 'VidSrc', file: 'vidsrc.js' },
-  { id: 'vidfast', name: 'VidFast', file: 'vidfast.js' },
-  { id: 'vidlink', name: 'VidLink', file: 'vidlink.js' },
   { id: 'videasy', name: 'VidEasy', file: 'videasy.js' },
   { id: 'peachify', name: 'Peachify', file: 'peachify.js' },
   { id: 'streamflix', name: 'StreamFlix', file: 'streamflix.js' },
@@ -42,8 +69,29 @@ const PROVIDERS = [
   { id: 'torrentio', name: 'Torrentio', file: 'torrentio.js' }
 ];
 
-function loadStrictVendoredProvider(entry, file) {
+const PATCHED_PROVIDERS = ['hdhub4u', 'castle', 'peachify'];
+
+function loadPatchedProvider(entry, file) {
   let source = fs.readFileSync(file, 'utf8');
+
+  if (entry.id === 'peachify') {
+    // Peachify queries five servers and waits for all of them, with a 15s
+    // per-server timeout (TIMEOUT=0x3a98). Two of the five hang to that
+    // timeout on every call, so the whole provider always took 15s - and
+    // PROVIDER_TIMEOUT_MS killed it at 8 every single time. It was ranked
+    // second and had contributed nothing, ever, including on titles where it
+    // does have streams.
+    //
+    // The three servers that answer do so in about a second. Cutting the
+    // per-server timeout to 6s lets their results through inside our own
+    // deadline: measured 15.0s -> 6.2s, and 0 streams -> 3 (Inception) and 5
+    // (Dune: Part Two) on titles that previously always returned nothing.
+    const before = source;
+    source = source.replace('TIMEOUT=0x3a98', 'TIMEOUT=0x1770');
+    if (source === before) {
+      console.warn('Provider registry: peachify timeout constant not found; leaving it at its 15s default.');
+    }
+  }
 
   if (entry.id === 'hdhub4u') {
     // Its original 0.3 score accepts partial matches such as "P.S. I Love
@@ -114,8 +162,8 @@ function loadStrictVendoredProvider(entry, file) {
 const loaded = PROVIDERS.map((entry) => {
   try {
     const file = path.join(__dirname, '..', '..', 'providers', entry.file);
-    const module = ['hdhub4u', 'castle'].includes(entry.id)
-      ? loadStrictVendoredProvider(entry, file)
+    const module = PATCHED_PROVIDERS.includes(entry.id)
+      ? loadPatchedProvider(entry, file)
       : require(file);
     return { ...entry, module };
   } catch (error) {
@@ -132,7 +180,7 @@ function isTorrentioCachedLabel(name) {
 // replaced global.fetch, forcing every cold English lookup through one queue.
 // We already have the IMDb id at the HTTP boundary, so call Torrentio directly:
 // one request, no global state, no queue, and a real abortable deadline.
-async function fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum, { diagnostics = false } = {}) {
+async function fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum, { diagnostics = false, timeoutMs = TORRENTIO_TIMEOUT_MS } = {}) {
   const settings = global.SCRAPER_SETTINGS || {};
   if (!settings.debridProvider || !settings.debridKey) {
     throw new Error('Torrentio debrid settings are unavailable');
@@ -151,7 +199,7 @@ async function fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum, {
   const debrid = `${encodeURIComponent(settings.debridProvider)}=${encodeURIComponent(settings.debridKey)}`;
   const url = `https://torrentio.strem.fun/${debrid}/stream/${contentId}.json`;
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), TORRENTIO_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   const upstream = { httpStatus: null, streamCount: null, cachedLabelCount: null };
 
   try {
@@ -170,7 +218,7 @@ async function fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum, {
     })).filter((stream) => Boolean(stream.url));
     return diagnostics ? { streams, upstream } : streams;
   } catch (error) {
-    if (error.name === 'AbortError') throw new Error(`Torrentio timed out after ${TORRENTIO_TIMEOUT_MS}ms`);
+    if (error.name === 'AbortError') throw new Error(`Torrentio timed out after ${timeoutMs}ms`);
     throw error;
   } finally {
     clearTimeout(timeoutId);
@@ -282,14 +330,25 @@ async function diagnoseTorrentio(imdbId, mediaType, seasonNum, episodeNum) {
  * individual failures/timeouts, and returns { providerId, providerName,
  * streams }[] for whichever came back with results.
  */
-async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum) {
+async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum, { timeoutMs } = {}) {
+  // The caller owns the request budget and tells us what is left of it. Without
+  // this the provider deadline was a fixed 8s that knew nothing about the time
+  // TMDB had already spent, so a slow lookup pushed the whole response past the
+  // point where probing could run and unverified links went out.
+  const deadline = Math.max(
+    MIN_PROVIDER_TIMEOUT_MS,
+    Math.min(PROVIDER_TIMEOUT_MS, timeoutMs ?? PROVIDER_TIMEOUT_MS)
+  );
+
   const attempts = loaded.map(async (provider) => {
     try {
       let streams = provider.id === 'torrentio'
-        ? await fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum)
+        ? await fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum, {
+          timeoutMs: Math.min(TORRENTIO_TIMEOUT_MS, deadline)
+        })
         : await withTimeout(
           Promise.resolve(provider.module.getStreams(tmdbId, mediaType, seasonNum, episodeNum)),
-          PROVIDER_TIMEOUT_MS,
+          deadline,
           provider.id
         );
       streams = Array.isArray(streams) ? streams : [];

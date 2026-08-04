@@ -18,6 +18,10 @@ test.before(async () => {
       res.writeHead(200, { 'Content-Type': 'text/html' });
       return res.end('<html>expired</html>');
     }
+    if (req.url === '/playlist') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      return res.end('#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:6,\nseg0.ts\n');
+    }
     if (req.url === '/missing') {
       res.writeHead(404, { 'Content-Type': 'video/mp4' });
       return res.end();
@@ -48,6 +52,13 @@ test('rejects provider error pages', async () => {
 // web page rather than media, are.
 test('keeps a refusing status, which players routinely get past anyway', async () => {
   assert.equal(await probeStream({ url: `${origin}/forbidden` }), true);
+});
+
+// Content type alone is not enough to call something an error page: plenty of
+// hosts serve an HLS playlist as text/plain, and dropping those threw away
+// working streams for looking like HTML.
+test('keeps an HLS playlist served as text/plain', async () => {
+  assert.equal(await probeStream({ url: `${origin}/playlist` }), true);
 });
 
 test('rejects links that are definitively gone', async () => {
