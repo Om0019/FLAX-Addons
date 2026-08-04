@@ -30,7 +30,6 @@ const PROVIDERS = [
   { id: 'vidlink', name: 'VidLink', file: 'vidlink.js' },
   { id: 'videasy', name: 'VidEasy', file: 'videasy.js' },
   { id: 'allwish', name: 'All-Wish', file: 'allwish.js' },
-  { id: 'castle', name: 'Castle', file: 'castle.js' },
   { id: 'netmirror', name: 'NetMirror', file: 'netmirror.js' },
   { id: '4khdhubnew', name: '4KHDHub', file: '4khdhubnew.js' },
   { id: 'hdhub4u', name: 'HDHub4u', file: 'hdhub4u.js' },
@@ -99,6 +98,28 @@ function withTimeout(promise, ms, label) {
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms))
   ]);
+}
+
+const TITLE_STOP_WORDS = new Set(['a', 'an', 'and', 'for', 'in', 'of', 'the', 'to']);
+const TITLE_GUARDED_PROVIDERS = new Set(['4khdhubnew', 'hdhub4u', 'uhdmovies']);
+
+function titleTokens(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(' ')
+    .filter((token) => token.length > 1 && !TITLE_STOP_WORDS.has(token));
+}
+
+function streamMatchesTitle(stream, expectedTitle) {
+  const expected = [...new Set(titleTokens(expectedTitle))];
+  if (expected.length < 2) return true;
+
+  const actual = new Set(titleTokens(stream.title || stream.name));
+  const matched = expected.filter((token) => actual.has(token)).length;
+  // Requiring most meaningful title words rejects fuzzy lookalikes such as
+  // "P.S. I Love You" for "I Love You Phillip Morris".
+  return matched >= Math.ceil(expected.length * 0.75);
 }
 
 /**
@@ -189,7 +210,7 @@ async function diagnoseTorrentio(imdbId, mediaType, seasonNum, episodeNum) {
  * individual failures/timeouts, and returns { providerId, providerName,
  * streams }[] for whichever came back with results.
  */
-async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum) {
+async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum, expectedTitle) {
   const attempts = loaded.map(async (provider) => {
     try {
       let streams = provider.id === 'torrentio'
@@ -202,6 +223,12 @@ async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum)
       streams = Array.isArray(streams) ? streams : [];
       if (provider.id === 'torrentio') {
         streams = await filterCachedTorrentioStreams(streams);
+      } else if (TITLE_GUARDED_PROVIDERS.has(provider.id)) {
+        const before = streams.length;
+        streams = streams.filter((stream) => streamMatchesTitle(stream, expectedTitle));
+        if (streams.length !== before) {
+          console.warn(`${provider.name}: dropped ${before - streams.length} title-mismatched stream(s) for "${expectedTitle}".`);
+        }
       }
       return { providerId: provider.id, providerName: provider.name, streams };
     } catch (error) {
