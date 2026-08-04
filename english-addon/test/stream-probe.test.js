@@ -18,6 +18,10 @@ test.before(async () => {
       res.writeHead(200, { 'Content-Type': 'text/html' });
       return res.end('<html>expired</html>');
     }
+    if (req.url === '/missing') {
+      res.writeHead(404, { 'Content-Type': 'video/mp4' });
+      return res.end();
+    }
     res.writeHead(403, { 'Content-Type': 'video/mp4' });
     res.end();
   });
@@ -31,7 +35,27 @@ test('accepts a reachable media response and forwards source headers', async () 
   assert.equal(await probeStream({ url: `${origin}/video`, headers: { Referer: 'https://required.example/' } }), true);
 });
 
-test('rejects provider error pages and failing statuses', async () => {
+test('rejects provider error pages', async () => {
   assert.equal(await probeStream({ url: `${origin}/error-page` }), false);
-  assert.equal(await probeStream({ url: `${origin}/forbidden` }), false);
+});
+
+// The probe and this test used to disagree outright: the probe accepts a 403 by
+// design, the test demanded it be rejected, and nothing ran the file so nobody
+// saw it. The probe's reading is the right one — these CDNs routinely answer a
+// 2KB Range request with 403 or 416 and then serve the same URL to a player
+// without complaint — so a status alone is not grounds for dropping a link. Only
+// the two statuses that mean the resource is gone, and a body that is plainly a
+// web page rather than media, are.
+test('keeps a refusing status, which players routinely get past anyway', async () => {
+  assert.equal(await probeStream({ url: `${origin}/forbidden` }), true);
+});
+
+test('rejects links that are definitively gone', async () => {
+  assert.equal(await probeStream({ url: `${origin}/missing` }), false);
+});
+
+test('rejects a URL that is not http(s)', async () => {
+  assert.equal(await probeStream({ url: 'magnet:?xt=urn:btih:abc' }), false);
+  assert.equal(await probeStream({ url: 'not a url' }), false);
+  assert.equal(await probeStream({}), false);
 });

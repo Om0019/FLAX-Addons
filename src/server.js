@@ -302,7 +302,13 @@ app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
     // with the resolving User-Agent — then failed the moment Stremio played it.
     const headers = {
       'User-Agent': getUpstreamUserAgent(req),
-      'Referer': referer
+      'Referer': referer,
+      // Asked for explicitly because fetch otherwise advertises gzip and then
+      // decompresses the reply behind our back, which desynchronises the length
+      // and range headers we relay from the bytes we actually forward. Video and
+      // segment bodies are already compressed formats, so identity costs nothing
+      // here. A server that ignores this is still handled below.
+      'Accept-Encoding': 'identity'
     };
 
     const range = req.get('range');
@@ -350,9 +356,23 @@ app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
       return;
     }
 
-    if (contentRange) res.setHeader('Content-Range', contentRange);
-    if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
-    if (contentLength) res.setHeader('Content-Length', contentLength);
+    // fetch decompresses a gzip/br/deflate body transparently, so upstream's
+    // Content-Length, Content-Range and Accept-Ranges all describe bytes the
+    // client is never going to receive. Forwarding them made the player expect a
+    // length the connection could not deliver — a stall or a truncated file
+    // partway through, depending on the client. Relaying an encoded body's byte
+    // counts is only correct when nothing re-encoded it in between, so when
+    // upstream encoded it, none of the three are passed on and the response is
+    // simply framed by the connection.
+    const wasDecompressed = Boolean(upstream.headers.get('content-encoding'));
+
+    if (wasDecompressed) {
+      console.warn(`Proxy Stream: upstream ignored Accept-Encoding: identity for ${resolvedUrl}; forwarding without length/range headers`);
+    } else {
+      if (contentRange) res.setHeader('Content-Range', contentRange);
+      if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
+      if (contentLength) res.setHeader('Content-Length', contentLength);
+    }
 
     if (!upstream.body) {
       return res.end();
