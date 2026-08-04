@@ -48,12 +48,38 @@ function loadStrictVendoredProvider(entry, file) {
     // Its original 0.3 score accepts partial matches such as "P.S. I Love
     // You" for "I Love You Phillip Morris". This is the source selector,
     // before it opens any download pages or emits streams.
-    source = source.replace('&&_0x9de7ca>0.3&&', '&&_0x9de7ca>=0.75&&');
-    // A failed selector must not silently become the first search result.
-    source = source.replace('_0x250433||_0x424e15[0x0]', '_0x250433');
+    //
+    // The vendored scorer (findBestTitleMatch) is Jaccard token overlap
+    // (intersection/union). Real hdhub4u titles carry release cruft — "Fight
+    // Club (1999) BluRay [Hindi (ORG 2.0) & English] 1080p 720p & 480p
+    // [x264/10Bit-HEVC] | Full Movie" — which deflates the ratio, so even an
+    // exact title scores below the scorer's own 0.3 gate. In practice the
+    // correct row is only ever selected by the `|| results[0]` first-result
+    // fallback that follows. That fallback is exactly what accepts wrong
+    // partial matches ("P.S. I Love You" for "I Love You Phillip Morris").
+    //
+    // So: keep the fallback (removing it dropped every legitimate movie —
+    // Fight Club returned zero), but gate it on token coverage — accept the
+    // first result only when it actually covers the query's significant title
+    // tokens. Coverage survives release cruft where Jaccard does not.
+    const coverageHelper = `function __englishHdhubCovers(candidate, target) {
+      const tokens = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ').filter((token) => token.length > 1 && !['a', 'an', 'and', 'for', 'in', 'of', 'the', 'to'].includes(token));
+      const wanted = [...new Set(tokens(target))];
+      if (wanted.length === 0) return false;
+      const found = new Set(tokens(candidate));
+      return wanted.filter((token) => found.has(token)).length >= Math.ceil(wanted.length * 0.75);
+    }\n`;
+    source = source.replace('function calculateTitleSimilarity', `${coverageHelper}function calculateTitleSimilarity`);
+    // _0x2fa81d is the query object (.title/.year); _0x424e15 the search
+    // results; _0x250433 the scorer's pick (usually null here).
     source = source.replace(
-      '_0x8b1a29=_0x250433;console',
-      '_0x8b1a29=_0x250433;if(!_0x8b1a29)return[];console'
+      '_0x8b1a29=_0x250433||_0x424e15[0x0]',
+      "_0x8b1a29=_0x250433||(_0x424e15[0x0]&&__englishHdhubCovers(_0x424e15[0x0]['title'],_0x2fa81d['title'])?_0x424e15[0x0]:null)"
+    );
+    // A failed selector must not silently become the first search result.
+    source = source.replace(
+      '_0x8b1a29=_0x250433||(_0x424e15[0x0]&&__englishHdhubCovers(_0x424e15[0x0][\'title\'],_0x2fa81d[\'title\'])?_0x424e15[0x0]:null);console',
+      '_0x8b1a29=_0x250433||(_0x424e15[0x0]&&__englishHdhubCovers(_0x424e15[0x0][\'title\'],_0x2fa81d[\'title\'])?_0x424e15[0x0]:null);if(!_0x8b1a29)return[];console'
     );
   }
 
