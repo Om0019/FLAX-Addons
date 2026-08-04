@@ -67,6 +67,7 @@ const STREAM_VALIDATION_FAST_TIMEOUT_MS = 2400;
 // has to catch a host that is refusing or gone, and an inconclusive answer leaves
 // the stream in the candidate list rather than dropping it.
 const HLS_VARIANT_VALIDATION_TIMEOUT_MS = 1500;
+const HLS_PLAYBACK_VALIDATION_MAX_DEPTH = 3;
 // Probes read this many bytes. It also tells a truncated body from a complete one,
 // which is what lets an empty playlist be told apart from one that simply has not
 // been read far enough yet.
@@ -705,33 +706,32 @@ function firstVariantUrl(body, manifestUrl) {
   return null;
 }
 
-/**
- * Probes one variant of a master playlist. Returns true when it is a playlist,
- * false when the host gave a definite refusal, and null when the answer is
- * inconclusive — a timeout says we ran out of budget, not that the stream is bad.
- */
-async function probeHlsVariant(variantUrl, headers, signal) {
+/** Follows a bounded HLS chain through a first real media resource. */
+async function probeHlsPlayback(body, manifestUrl, headers, signal, depth = 0) {
+  const resourceUrl = firstVariantUrl(body, manifestUrl);
+  if (!resourceUrl) return isCompleteProbeBody(body) ? false : null;
+  if (depth >= HLS_PLAYBACK_VALIDATION_MAX_DEPTH) return null;
+
   try {
-    const { res, text } = await fetchTextWithTimeout(variantUrl, {
+    const { res, text } = await fetchTextWithTimeout(resourceUrl, {
       method: 'GET',
       headers: { ...headers, Range: `bytes=0-${PROBE_RANGE_BYTES - 1}` },
       redirect: 'follow',
       signal
     }, HLS_VARIANT_VALIDATION_TIMEOUT_MS);
 
-    // The master loaded over this same path a moment ago, so the route works and
-    // any status the variant returns is about the variant. Treating 5xx as merely
-    // inconclusive let a master whose variant hosts are gone survive validation
-    // and be offered — the failure this whole probe exists to catch. Only an
-    // explicit rate limit is genuinely transient.
+    // A 5xx below an otherwise healthy manifest is a definite playback failure.
+    // Only an explicit rate limit is genuinely transient.
     if (res.status === 429) return null;
     if (!res.ok && res.status !== 206) return false;
     if (isHtmlResponse(res)) return false;
-    if (hasPlaylistEntries(text)) return true;
+    if (hasPlaylistEntries(text)) {
+      return probeHlsPlayback(text, res.url || resourceUrl, headers, signal, depth + 1);
+    }
 
-    // A variant that came back whole and still names nothing is an empty
-    // playlist. Truncated, it is only unread.
-    return isCompleteProbeBody(text) ? false : null;
+    // A non-playlist response reached through a playlist URI is the media
+    // resource itself. A successful non-HTML response proves playback can start.
+    return true;
   } catch (error) {
     // A host that is definitively not there is an answer. A timeout is not.
     return isDefiniteFetchFailure(error) ? false : null;
@@ -853,26 +853,14 @@ async function isPlayableStream(stream, signal, timeoutMs) {
         console.log(`Scraper orchestrator: Filtering empty playlist with no variants or segments: ${stream.url}`);
       }
 
-      // A master playlist that loads is not yet a stream that plays: it only
-      // names other playlists, and those live on separate hosts that can be gone
-      // while the master is served happily. turboviplay masters return 200 with
-      // variants on hosts that no longer resolve, so the stream was ranked near
-      // the top and then played nothing. Follow one variant before believing it.
-      if (playable && isMasterPlaylist(body)) {
-        const variantUrl = firstVariantUrl(body, response.url || stream.url);
-        // No variant to follow means two different things. On a body that was read
-        // whole it is a master naming nothing playable, and that is a refusal. On a
-        // truncated one the first variant URI can simply sit past the range that was
-        // asked for — a master with a long run of #EXT-X-MEDIA renditions, which is
-        // ordinary for multi-language Latino content — and calling that unreachable
-        // dropped a live stream and charged its host a hard failure, two of which
-        // mark the whole CDN dead for three minutes.
-        const variantVerdict = variantUrl
-          ? await probeHlsVariant(variantUrl, headers, signal)
-          : (isCompleteProbeBody(body) ? false : null);
+      // A manifest that loads is not yet a stream that plays: a child playlist or
+      // first media segment can still be unavailable. Follow the bounded HLS chain
+      // before believing it.
+      if (playable) {
+        const variantVerdict = await probeHlsPlayback(body, response.url || stream.url, headers, signal);
 
         if (variantVerdict === false) {
-          console.log(`Scraper orchestrator: Filtering master playlist whose variants are unreachable: ${stream.url}`);
+          console.log(`Scraper orchestrator: Filtering HLS playlist whose media chain is unreachable: ${stream.url}`);
           recordHostHealth(stream, 'hard-fail', {
             status: response.status,
             latencyMs: Date.now() - startedAt
