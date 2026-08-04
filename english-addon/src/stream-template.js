@@ -4,7 +4,7 @@
  * through the same formatting.
  *
  *   Name:        {cached ? "⚡️ " : ""}{indexer}
- *   Description: {container ? container : ""}{resolution ? " • " + resolution : ""}
+ *   Description: English{container ? " • " + container : ""}{resolution ? " • " + resolution : ""}
  *
  * `indexer` is the provider's own label (e.g. "VidSrc", "Torrentio") - these
  * vendored files don't expose a finer per-tracker field (Torrentio's actual
@@ -32,8 +32,8 @@ function formatStreamName(indexer, cached) {
   return cached ? `⚡️ ${indexer}` : indexer;
 }
 
-function formatStreamDescription({ container, resolution }) {
-  return [container, resolution].filter(Boolean).join(' • ') || ' ';
+function formatStreamDescription({ language, container, resolution }) {
+  return [language, container, resolution].filter(Boolean).join(' • ') || ' ';
 }
 
 module.exports = { extractContainer, extractResolution, formatStreamName, formatStreamDescription };

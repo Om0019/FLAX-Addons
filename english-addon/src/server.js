@@ -32,6 +32,7 @@ function normalizeStream(raw, providerName) {
   return {
     name: formatStreamName(providerName, raw.__cached === true),
     title: formatStreamDescription({
+      language: 'English',
       container: extractContainer(raw.url),
       resolution: extractResolution(raw)
     }),

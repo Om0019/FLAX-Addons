@@ -4,7 +4,7 @@
  * the same formatting rather than each one building display text itself.
  *
  *   Name:        {cached ? "⚡️ " : ""}{indexer}
- *   Description: {container ? container : ""}{resolution ? " • " + resolution : ""}
+ *   Description: Latino{container ? " • " + container : ""}{resolution ? " • " + resolution : ""}
  *
  * `indexer` is whatever a scraper set as the stream's `name` before this
  * runs (e.g. "SoloLatino", "Torrentio") - there's no finer per-tracker
@@ -26,8 +26,8 @@ function formatStreamName(indexer, cached) {
   return cached ? `⚡️ ${indexer}` : indexer;
 }
 
-function formatStreamDescription({ container, resolution }) {
-  return [container, resolution].filter(Boolean).join(' • ') || ' ';
+function formatStreamDescription({ language, container, resolution }) {
+  return [language, container, resolution].filter(Boolean).join(' • ') || ' ';
 }
 
 function applyStreamTemplate(stream, addonName) {
@@ -39,7 +39,7 @@ function applyStreamTemplate(stream, addonName) {
   return {
     ...stream,
     name: formatStreamName(indexer, cached),
-    title: formatStreamDescription({ container, resolution })
+    title: formatStreamDescription({ language: 'Latino', container, resolution })
   };
 }
 
