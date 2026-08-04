@@ -12,7 +12,7 @@
 const path = require('path');
 const { configureTorrentioSettings } = require('../torrentio-settings');
 const { checkTorboxCached } = require('../torbox-cache');
-const { createTtlCache } = require('../../src/ttl-cache');
+const { createTtlCache } = require('../../../src/ttl-cache');
 
 configureTorrentioSettings();
 
