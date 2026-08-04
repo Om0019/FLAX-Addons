@@ -23,6 +23,17 @@ const EMBED_RESOLVE_CONCURRENCY = 3;
 // completes ~90% of the time; anything slower is not worth the shared event loop.
 const MAX_POW_DIFFICULTY = 6;
 const MAX_POW_MS = 3000;
+// A VOE mirror (matthewhotelscience.com, and whatever domain it rotates to next)
+// gates its player page behind an Altcha proof-of-work challenge: PBKDF2 with a
+// server-chosen cost, searching for a counter whose derived key starts with a
+// given prefix. Unlike embed69's own cheap SHA-256 challenge above, each guess
+// here is a full PBKDF2 derivation (~5ms measured at cost=10000) rather than a
+// hash, so the search space has to be bounded far more tightly: one prefix byte
+// (256 expected guesses) costs about a second, two bytes would cost minutes.
+// Refuse anything longer up front rather than let a raised server-side
+// difficulty block the event loop for the length of a movie.
+const MAX_ALTCHA_KEY_PREFIX_HEX_LENGTH = 2;
+const MAX_ALTCHA_POW_MS = 4000;
 // embed69 lists every server it knows about, and each one costs a fetch. The gate
 // below admits anything that is not an unresolvable file locker, so the number of
 // attempts has to be capped here instead of by the shortness of an allowlist.
@@ -599,6 +610,136 @@ function normalizeVoeCandidate(value) {
   }
 
   return null;
+}
+
+/**
+ * VOE mirrors (matthewhotelscience.com at last check; the domain rotates) can
+ * serve an Altcha "confirm you're human" page instead of the player: a form
+ * carrying a CSRF token and an <altcha-widget> pointing at a challenge URL, which
+ * must be solved and POSTed back before the real page is served. This is not a
+ * detection scheme distinguishing bots from humans — it's a fixed, published
+ * client-side algorithm (github.com/altcha-org/altcha) that anyone, including a
+ * script, can run; solving it is not bypassing a protection, it's using the page
+ * the way its own widget does.
+ */
+function extractAltchaGate(html) {
+  if (!html || !html.includes('altcha-widget')) return null;
+
+  const tokenMatch = html.match(/name=["']_token["']\s+value=["']([^"']+)["']/);
+  const challengeMatch = html.match(/<altcha-widget[^>]+challenge=["']([^"']+)["']/);
+  if (!tokenMatch || !challengeMatch) return null;
+
+  return { csrfToken: tokenMatch[1], challengeUrl: challengeMatch[1] };
+}
+
+/**
+ * Altcha's PBKDF2 challenge: find a counter such that PBKDF2(nonce || counter,
+ * salt, cost, keyLength) starts with keyPrefix. counter is appended to the nonce
+ * as a big-endian uint32, per the algorithm's default counter mode — this
+ * addon only ever needs to solve what the widget's own default configuration
+ * produces, not the full space of options the library supports.
+ */
+function solveAltchaChallenge(parameters) {
+  const { nonce, salt, cost, keyLength = 32, keyPrefix, algorithm } = parameters || {};
+  if (!nonce || !salt || !cost || !keyPrefix) return null;
+  if (keyPrefix.length > MAX_ALTCHA_KEY_PREFIX_HEX_LENGTH) {
+    console.warn(`Unpacker: Refusing Altcha challenge with ${keyPrefix.length}-hex-char prefix (max ${MAX_ALTCHA_KEY_PREFIX_HEX_LENGTH}).`);
+    return null;
+  }
+
+  const digest = algorithm === 'PBKDF2/SHA-512' ? 'sha512' : algorithm === 'PBKDF2/SHA-384' ? 'sha384' : 'sha256';
+  const nonceBuf = Buffer.from(nonce, 'hex');
+  const saltBuf = Buffer.from(salt, 'hex');
+  const keyPrefixBuf = Buffer.from(keyPrefix, 'hex');
+  const password = Buffer.alloc(nonceBuf.length + 4);
+  nonceBuf.copy(password, 0);
+
+  const deadline = Date.now() + MAX_ALTCHA_POW_MS;
+  const start = Date.now();
+  for (let counter = 0; ; counter += 1) {
+    if (Date.now() > deadline) {
+      console.warn(`Unpacker: Altcha proof-of-work exceeded ${MAX_ALTCHA_POW_MS}ms after ${counter} guesses; giving up.`);
+      return null;
+    }
+    password.writeUInt32BE(counter >>> 0, nonceBuf.length);
+    const derived = crypto.pbkdf2Sync(password, saltBuf, cost, keyLength, digest);
+    if (derived.subarray(0, keyPrefixBuf.length).equals(keyPrefixBuf)) {
+      return { counter, derivedKey: derived.toString('hex'), time: Date.now() - start };
+    }
+  }
+}
+
+/**
+ * Every Set-Cookie the server sent gets folded into one Cookie header for the
+ * next request in the sequence, later values winning over earlier ones — the
+ * session cookie backing the CSRF token issued alongside the gate page has to
+ * still be present when the solved challenge is POSTed back, and the challenge
+ * fetch in between may itself rotate cookies.
+ */
+function mergeSetCookies(existingCookieHeader, res) {
+  const setCookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+  if (setCookies.length === 0) return existingCookieHeader;
+
+  const jar = new Map();
+  for (const pair of (existingCookieHeader || '').split(';')) {
+    const [name, ...rest] = pair.trim().split('=');
+    if (name) jar.set(name, rest.join('='));
+  }
+  for (const setCookie of setCookies) {
+    const [name, ...rest] = setCookie.split(';')[0].trim().split('=');
+    if (name) jar.set(name, rest.join('='));
+  }
+
+  return Array.from(jar.entries()).map(([name, value]) => `${name}=${value}`).join('; ');
+}
+
+/**
+ * Solves the gate found by extractAltchaGate and POSTs the result back to the
+ * same URL, returning the response as fetchTextWithTimeout would so the caller
+ * can fall through to its normal extraction on the now-unlocked page. `access`
+ * mirrors the hidden field the page itself carries at value "0"; `altcha` is the
+ * hidden field name the widget's web component uses by default.
+ */
+async function resolveAltchaGate(url, gateRes, gate, userAgent, referer, signal) {
+  let cookies = mergeSetCookies('', gateRes);
+
+  const challengeRes = await fetchTextWithTimeout(gate.challengeUrl, {
+    headers: { 'User-Agent': userAgent, 'Cookie': cookies, 'Referer': url },
+    signal
+  }, PLAYER_FETCH_TIMEOUT_MS);
+  cookies = mergeSetCookies(cookies, challengeRes.res);
+  if (!challengeRes.res.ok) return null;
+
+  let challenge;
+  try {
+    challenge = JSON.parse(challengeRes.text);
+  } catch {
+    return null;
+  }
+
+  const solution = solveAltchaChallenge(challenge.parameters);
+  if (!solution) return null;
+
+  const payload = Buffer.from(JSON.stringify({
+    challenge: { parameters: challenge.parameters, signature: challenge.signature },
+    solution
+  })).toString('base64');
+
+  const body = new URLSearchParams({ _token: gate.csrfToken, access: '0', altcha: payload });
+  const solvedRes = await fetchTextWithTimeout(url, {
+    method: 'POST',
+    headers: {
+      'User-Agent': userAgent,
+      'Cookie': cookies,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Referer': url
+    },
+    body: body.toString(),
+    signal
+  }, PLAYER_FETCH_TIMEOUT_MS);
+  if (!solvedRes.res.ok) return null;
+
+  return solvedRes;
 }
 
 /**
@@ -1219,11 +1360,19 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
             return directUrl;
         }
 
-        const { res, text: html } = await fetchTextWithTimeout(url, {
+        const { res, text: rawHtml } = await fetchTextWithTimeout(url, {
             headers: { 'User-Agent': userAgent, 'Referer': referer },
             signal
         }, PLAYER_FETCH_TIMEOUT_MS);
         if (!res.ok) return null;
+
+        let html = rawHtml;
+        const altchaGate = extractAltchaGate(html);
+        if (altchaGate) {
+            const solved = await resolveAltchaGate(url, res, altchaGate, userAgent, referer, signal);
+            if (!solved) return null;
+            html = solved.text;
+        }
 
         if (isXupalaceHost(url) || html.includes('go_to_playerVast')) {
             const xupalaceDirectUrl = await resolveXupalaceServers(html, url, userAgent, { depth, visited, signal });
@@ -1427,6 +1576,9 @@ module.exports = {
     extractStreamtapeStream,
     extractVidguardStream,
     extractVoeDirectStream,
+    extractAltchaGate,
+    solveAltchaChallenge,
+    mergeSetCookies,
     isPelisplusHost,
     isStreamtapeHost,
     isSupportedEmbedServer,
