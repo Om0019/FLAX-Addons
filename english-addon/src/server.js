@@ -30,9 +30,8 @@ function normalizeStream(raw, providerName) {
   }
 
   return {
-    name: formatStreamName(MANIFEST.name, raw.__cached === true),
+    name: formatStreamName(providerName, raw.__cached === true),
     title: formatStreamDescription({
-      indexer: providerName,
       container: extractContainer(raw.url),
       resolution: extractResolution(raw)
     }),

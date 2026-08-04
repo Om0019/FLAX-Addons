@@ -98,6 +98,20 @@ function isCachedTorrentioStream(stream) {
   return /(?:^|[^A-Z0-9])TB\+(?:$|[^A-Z0-9])/i.test(`${stream?.title || ''} ${stream?.name || ''}`);
 }
 
+function torrentioResolutionTier(stream) {
+  const text = `${stream?.title || ''} ${stream?.name || ''}`.toLowerCase();
+  if (/\b(2160p|4k)\b/.test(text)) return '2160p';
+  if (/\b1080p\b/.test(text)) return '1080p';
+  return null;
+}
+
+function selectTorrentioStreams(streams) {
+  return ['2160p', '1080p'].flatMap((tier) => {
+    const stream = streams.find((candidate) => torrentioResolutionTier(candidate) === tier);
+    return stream ? [stream] : [];
+  });
+}
+
 function toInternalStream(raw) {
   const headers = raw.headers && Object.keys(raw.headers).length > 0 ? raw.headers : null;
   return {
@@ -126,9 +140,9 @@ async function scrape(title, originalTitle, year, type, season, episode, options
     const rawStreams = await getSpanishPreferredStreams(tmdbId, mediaType, season, episode);
     // getSpanishPreferredStreams has already restricted this response to
     // Spanish-source, `TB+` cached entries before the vendor reformats them.
-    const spanishStreams = rawStreams || [];
+    const spanishStreams = selectTorrentioStreams(rawStreams || []);
 
-    console.log(`Torrentio: ${rawStreams?.length || 0} Spanish-source stream(s) total, ${spanishStreams.length} cached`);
+    console.log(`Torrentio: ${rawStreams?.length || 0} Spanish-source stream(s) total, ${spanishStreams.length} cached high-quality`);
 
     return spanishStreams.map(toInternalStream).filter((stream) => Boolean(stream.url));
   } catch (error) {
@@ -139,5 +153,5 @@ async function scrape(title, originalTitle, year, type, season, episode, options
 
 module.exports = {
   scrape,
-  __test: { isSpanishLanguageStream, isCachedTorrentioStream }
+  __test: { isSpanishLanguageStream, isCachedTorrentioStream, torrentioResolutionTier, selectTorrentioStreams }
 };

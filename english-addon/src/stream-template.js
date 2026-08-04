@@ -3,8 +3,8 @@
  * the HTTP boundary (src/server.js) so every provider's raw output goes
  * through the same formatting.
  *
- *   Name:        {cached ? "⚡️ " : ""}{addonName} {cached ? "" : " "}
- *   Description: {indexer}{container ? " • " + container : " "} {resolution ? " • " + resolution : " "}
+ *   Name:        {cached ? "⚡️ " : ""}{indexer}
+ *   Description: {container ? container : ""}{resolution ? " • " + resolution : ""}
  *
  * `indexer` is the provider's own label (e.g. "VidSrc", "Torrentio") - these
  * vendored files don't expose a finer per-tracker field (Torrentio's actual
@@ -28,14 +28,12 @@ function extractResolution(raw) {
   return match[1].toLowerCase() === '4k' ? '2160p' : match[1].toLowerCase();
 }
 
-function formatStreamName(addonName, cached) {
-  return cached ? `⚡️ ${addonName} ` : `${addonName}  `;
+function formatStreamName(indexer, cached) {
+  return cached ? `⚡️ ${indexer}` : indexer;
 }
 
-function formatStreamDescription({ indexer, container, resolution }) {
-  const containerPart = container ? ` • ${container}` : ' ';
-  const resolutionPart = resolution ? ` • ${resolution}` : ' ';
-  return `${indexer}${containerPart} ${resolutionPart}`;
+function formatStreamDescription({ container, resolution }) {
+  return [container, resolution].filter(Boolean).join(' • ') || ' ';
 }
 
 module.exports = { extractContainer, extractResolution, formatStreamName, formatStreamDescription };

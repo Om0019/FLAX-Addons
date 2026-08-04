@@ -3,8 +3,8 @@
  * HTTP boundary (src/server.js) so every scraper's raw output goes through
  * the same formatting rather than each one building display text itself.
  *
- *   Name:        {cached ? "⚡️ " : ""}{addonName} {cached ? "" : " "}
- *   Description: {indexer}{container ? " • " + container : " "} {resolution ? " • " + resolution : " "}
+ *   Name:        {cached ? "⚡️ " : ""}{indexer}
+ *   Description: {container ? container : ""}{resolution ? " • " + resolution : ""}
  *
  * `indexer` is whatever a scraper set as the stream's `name` before this
  * runs (e.g. "SoloLatino", "Torrentio") - there's no finer per-tracker
@@ -22,14 +22,12 @@ function extractContainer(url) {
   return match ? match[1].toLowerCase() : null;
 }
 
-function formatStreamName(addonName, cached) {
-  return cached ? `⚡️ ${addonName} ` : `${addonName}  `;
+function formatStreamName(indexer, cached) {
+  return cached ? `⚡️ ${indexer}` : indexer;
 }
 
-function formatStreamDescription({ indexer, container, resolution }) {
-  const containerPart = container ? ` • ${container}` : ' ';
-  const resolutionPart = resolution ? ` • ${resolution}` : ' ';
-  return `${indexer}${containerPart} ${resolutionPart}`;
+function formatStreamDescription({ container, resolution }) {
+  return [container, resolution].filter(Boolean).join(' • ') || ' ';
 }
 
 function applyStreamTemplate(stream, addonName) {
@@ -40,8 +38,8 @@ function applyStreamTemplate(stream, addonName) {
 
   return {
     ...stream,
-    name: formatStreamName(addonName, cached),
-    title: formatStreamDescription({ indexer, container, resolution })
+    name: formatStreamName(indexer, cached),
+    title: formatStreamDescription({ container, resolution })
   };
 }
 
