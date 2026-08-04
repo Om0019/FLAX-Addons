@@ -110,6 +110,13 @@ async function fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum, {
   if (!settings.debridProvider || !settings.debridKey) {
     throw new Error('Torrentio debrid settings are unavailable');
   }
+  // Checked before the request, not after it. filterCachedTorrentioStreams drops
+  // everything when the provider is not TorBox — that is the only cache check
+  // wired up — so on any other provider this spent a full round trip, up to the
+  // 6s deadline, to produce a list it was always going to discard.
+  if (settings.debridProvider !== 'torbox') {
+    throw new Error(`Torrentio cache status cannot be verified for debrid provider "${settings.debridProvider}"`);
+  }
 
   const contentId = mediaType === 'tv'
     ? `series/${imdbId}:${seasonNum}:${episodeNum}`
@@ -143,11 +150,21 @@ async function fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum, {
   }
 }
 
+/**
+ * Bounds how long the caller waits. The vendored providers take no abort signal,
+ * so the work itself cannot be cancelled — but the timer must still be cleared,
+ * or every provider that answers quickly leaves a rejection armed for the full
+ * deadline, twelve of them per request, holding the event loop open long after
+ * the response went out.
+ */
 function withTimeout(promise, ms, label) {
+  let timeoutId;
   return Promise.race([
     promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms))
-  ]);
+    new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    })
+  ]).finally(() => clearTimeout(timeoutId));
 }
 
 /**
@@ -191,14 +208,14 @@ function torrentioResolutionTier(stream) {
 // debrid credentials. It shares the normal Torrentio request path so its
 // measurements reflect the same upstream response and cache filtering.
 async function diagnoseTorrentio(imdbId, mediaType, seasonNum, episodeNum) {
-  const provider = loaded.find((entry) => entry.id === 'torrentio');
   const startedAt = Date.now();
   const settings = global.SCRAPER_SETTINGS || {};
 
-  if (!provider) {
-    return { loaded: false, elapsedMs: Date.now() - startedAt };
-  }
-
+  // Deliberately does not gate on the vendored providers/torrentio.js being
+  // loadable. Torrentio is fetched directly by fetchTorrentioStreams and that
+  // module is not on the path at all, so a failure to load it made diagnostics
+  // report the source as unavailable while it was in fact working normally —
+  // the one answer a diagnostic route must never give wrongly.
   try {
     const { streams, upstream } = await fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum, { diagnostics: true });
     const cachedStreams = await filterCachedTorrentioStreams(streams);

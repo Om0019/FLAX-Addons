@@ -23,13 +23,24 @@ const {
   withQualityLabel
 } = require('../quality');
 
-const SCRAPER_TIMEOUT_MS = 10000;
-const SOLOLATINO_TIMEOUT_MS = 12000;
+const SCRAPER_COLLECTION_TIMEOUT_MS = 11500;
+// Every per-source budget has to end strictly before collection does, with room
+// to spare: a source whose own deadline lands after the collection deadline can
+// never report at all, so it is permanently "pending" as far as the fast-return
+// gate is concerned. SoloLatino and Torrentio were both set to 12000 against a
+// collection timeout of 11500, and because Torrentio is a required source
+// (requiredNames below), that alone held every request open for the full
+// collection budget — the fast-return path could not fire. The headroom is what
+// lets a source that answers at the last moment still be counted and still have
+// its streams probed.
+const SOURCE_DEADLINE_HEADROOM_MS = 1000;
+const MAX_SOURCE_TIMEOUT_MS = SCRAPER_COLLECTION_TIMEOUT_MS - SOURCE_DEADLINE_HEADROOM_MS;
+const SCRAPER_TIMEOUT_MS = Math.min(10000, MAX_SOURCE_TIMEOUT_MS);
+const SOLOLATINO_TIMEOUT_MS = MAX_SOURCE_TIMEOUT_MS;
 // Torrentio's own debrid-resolution round trip runs behind whatever debrid
 // provider is configured, on top of its own torrent-indexer lookup, so it
-// gets a longer budget than the HTML scrapers.
-const TORRENTIO_TIMEOUT_MS = 12000;
-const SCRAPER_COLLECTION_TIMEOUT_MS = 11500;
+// gets a longer budget than the HTML scrapers — up to the ceiling above.
+const TORRENTIO_TIMEOUT_MS = MAX_SOURCE_TIMEOUT_MS;
 const EMPTY_RESULT_GRACE_MS = 3500;
 // Return as soon as this many sources have produced this many streams between
 // them. Requiring two sources rather than one keeps the early exit from simply
@@ -79,6 +90,13 @@ const MAX_VALIDATION_CANDIDATES = 8;
 // other, so the earliest source's streams sat unchecked until the slowest source
 // finished. Capped so an early source cannot spend the whole budget.
 const MAX_EAGER_VALIDATIONS = 8;
+// …and capped again per source, because the global cap alone did not achieve
+// that. The first source to report usually has eight or more streams, so it took
+// every slot and every later source got no overlap at all — which is the entire
+// thing eager validation exists to provide. With a per-source share, the probes
+// spread across the sources that actually reported, and the streams the final
+// selection ranks highest are far more likely to have a verdict already.
+const MAX_EAGER_VALIDATIONS_PER_SOURCE = 3;
 // Alternative titles only widen the pool of names the scrapers search for, so they
 // are worth a short wait and nothing more. On the IMDb path the lookup cannot even
 // start until the id mapping comes back, which put two full TMDB deadlines — up to
@@ -86,6 +104,20 @@ const MAX_EAGER_VALIDATIONS = 8;
 // the extra titles for this request only: the call is left running and its answer
 // lands in the TMDB cache for the next one.
 const ALTERNATIVE_TITLES_MAX_WAIT_MS = 1500;
+// Ceiling on everything one uncached lookup may spend, measured from the moment
+// it starts — TMDB included. Each phase had its own deadline and none of them
+// knew about the others, so the worst case was additive: metadata, then up to
+// 1500ms for alternative titles, then 11500ms of collection, then 3500ms of
+// empty-result grace, then 3200ms of validation. Roughly 18s, which is past the
+// point where a Stremio client has given up and the whole response is wasted.
+// The phases now draw from what is left of this instead of each starting a fresh
+// clock.
+const TOTAL_REQUEST_BUDGET_MS = 15000;
+// Below this there is not enough time left for a probe to mean anything: it would
+// time out on arrival, return nothing usable, and still record a timeout against
+// the host's health. Under this much remaining budget the validation phase uses
+// only the verdicts the eager pass already produced.
+const MIN_VALIDATION_PHASE_MS = 600;
 const STREAM_CACHE_TTL_MS = 10 * 60 * 1000;
 const EMPTY_STREAM_CACHE_TTL_MS = 15 * 1000;
 const ENABLE_CINEHDPLUS = false;
@@ -122,15 +154,36 @@ function getStreamHost(stream) {
   return host;
 }
 
+/**
+ * Torrentio's debrid integration hands back an authenticated HTTPS link on its
+ * own host, not a magnet or a torrent file, so it is safe to keep once the
+ * source has established the entry as cached.
+ *
+ * Matched on host rather than path. The path was pinned to
+ * `/resolve/torbox/`, which Torrentio never emits — its debrid links are
+ * `/<provider>/<key>/<hash>/…` — so the exemption never fired, and since every
+ * one of these streams is named "Torrentio", the `name.includes('torrent')`
+ * rule below dropped the addon's only debrid-backed source in full. The path
+ * layout is Torrentio's to change; the host and the `__cached` flag are what
+ * actually carry the meaning here.
+ */
+function isCachedDebridResolverUrl(stream) {
+  if (stream.__cached !== true) return false;
+
+  try {
+    const parsed = new URL(stream.url);
+    return parsed.protocol === 'https:'
+      && parsed.hostname.toLowerCase() === 'torrentio.strem.fun';
+  } catch {
+    return false;
+  }
+}
+
 function isKnownBadStream(stream) {
   const url = (stream.url || '').toLowerCase();
   const title = (stream.title || '').toLowerCase();
   const name = (stream.name || '').toLowerCase();
-  // Torrentio's TorBox integration returns an authenticated HTTPS resolver URL,
-  // not a magnet/torrent file. It is safe to keep when the source already
-  // established it as cached; generic Torrentio/P2P results remain blocked.
-  const isCachedTorboxResolver = stream.__cached === true
-    && /^https:\/\/torrentio\.strem\.fun\/resolve\/torbox\//.test(url);
+  const isCachedTorboxResolver = isCachedDebridResolverUrl(stream);
   return url.includes('test-videos.co.uk')
     || url.includes('big_buck_bunny')
     || url.includes('magnet:')
@@ -928,6 +981,13 @@ async function isPlayableStream(stream, signal, timeoutMs) {
  */
 function createStreamValidator(signal, onConfirmed) {
   const byUrl = new Map();
+  // URLs a probe reached a real "not playable" verdict on. Held on the validator
+  // rather than in the phase that happened to start the probe, because the
+  // fallback paths need it too and they run outside any phase: a stream probed
+  // during collection could be disproven and then handed to a viewer anyway,
+  // because the only record of the verdict lived in a phase that never ran.
+  // Aborted and timed-out probes are deliberately absent — they judged nothing.
+  const disprovenUrls = new Set();
   let confirmed = 0;
 
   return {
@@ -954,12 +1014,24 @@ function createStreamValidator(signal, onConfirmed) {
         if (result && result.playable) {
           confirmed += 1;
           if (onConfirmed) onConfirmed();
+        } else if (result && result.conclusive) {
+          disprovenUrls.add(stream.url);
         }
         return result;
       });
 
       byUrl.set(stream.url, probe);
       return probe;
+    },
+
+    /** Whether this URL already has a probe, settled or in flight. */
+    has(url) {
+      return byUrl.has(url);
+    },
+
+    /** Whether a probe has reached a definite "not playable" verdict on this URL. */
+    isDisproven(url) {
+      return disprovenUrls.has(url);
     },
 
     get started() {
@@ -981,13 +1053,28 @@ function startEagerValidation(streams, validator) {
     streams.map(sanitizeStream).filter(Boolean).filter((stream) => !shouldSkipHost(stream))
   );
 
+  // Counted on the validator's own tally rather than on loop iterations: probes
+  // are shared by URL, so a stream another source already listed hands back the
+  // existing promise without starting anything, and must not consume this
+  // source's share.
+  let startedForThisSource = 0;
+
   for (const stream of candidates) {
     if (validator.started >= MAX_EAGER_VALIDATIONS) break;
+    if (startedForThisSource >= MAX_EAGER_VALIDATIONS_PER_SOURCE) break;
+
+    const startedBefore = validator.started;
     validator.validate(stream, STREAM_VALIDATION_EAGER_TIMEOUT_MS);
+    if (validator.started > startedBefore) startedForThisSource += 1;
   }
 }
 
-async function validatePlayableStreams(streams, validator, validationController) {
+/**
+ * `remainingBudgetMs` is what is left of the request's total budget. The phase's
+ * own deadline is whichever of the two is shorter — the phase can be as quick as
+ * it likes, but it may not extend a request that has already spent its time.
+ */
+async function validatePlayableStreams(streams, validator, validationController, remainingBudgetMs = Infinity) {
   const sortedStreams = sortStreams(streams);
   const eligibleStreams = sortedStreams.filter((stream) => !shouldSkipHost(stream));
   const skippedStreams = sortedStreams.filter(shouldSkipHost);
@@ -997,11 +1084,32 @@ async function validatePlayableStreams(streams, validator, validationController)
     ...skippedStreams
   ];
 
+  /**
+   * The candidate list for any path that gives up on probing, with anything a
+   * probe already disproved taken out.
+   *
+   * Every one of these fallbacks exists because an empty result is worse than an
+   * unverified one — validation has false negatives, so an unprobed stream
+   * deserves its place. A stream that was probed and came back 404 is not that:
+   * it is a link we know is dead. Handing those back was reachable in ordinary
+   * use, because failing probes are exactly what marks a host unhealthy: two dead
+   * links on a CDN take the whole host out of rotation, `eligibleStreams` empties,
+   * and the fallback below then re-offered the very streams whose failure caused
+   * it — dead links at the top of the viewer's list.
+   *
+   * If that leaves nothing at all, the original list still wins: at that point
+   * every option is bad and a false empty result is the worse of the two.
+   */
+  const withoutDisprovenStreams = (candidates) => {
+    const kept = candidates.filter((stream) => !validator.isDisproven(stream.url));
+    return kept.length > 0 ? kept : candidates;
+  };
+
   if (streamsToValidate.length === 0) {
     if (sortedStreams.length > 0) {
       console.warn('Scraper orchestrator: All candidate hosts are temporarily unhealthy; returning URL-sanitized streams as fallback.');
     }
-    return sortedStreams;
+    return withoutDisprovenStreams(sortedStreams);
   }
 
   const playableStreams = [];
@@ -1020,11 +1128,25 @@ async function validatePlayableStreams(streams, validator, validationController)
     resolveAllComplete = resolve;
   });
 
-  const timeoutMs = remainingStreams.length > 0
+  const preferredTimeoutMs = remainingStreams.length > 0
     ? STREAM_VALIDATION_FAST_TIMEOUT_MS
     : STREAM_VALIDATION_TOTAL_TIMEOUT_MS;
+  const timeoutMs = Math.min(preferredTimeoutMs, Math.max(0, remainingBudgetMs));
 
-  streamsToValidate.forEach((stream) => {
+  // With too little budget left to start anything new, the phase still runs — it
+  // just restricts itself to probes the eager pass already has going, whose
+  // verdicts cost nothing to collect.
+  const canStartNewProbes = timeoutMs >= MIN_VALIDATION_PHASE_MS;
+  const probeTargets = canStartNewProbes
+    ? streamsToValidate
+    : streamsToValidate.filter((stream) => validator.has(stream.url));
+
+  if (probeTargets.length === 0) {
+    console.warn(`Scraper orchestrator: Only ${Math.max(0, Math.round(remainingBudgetMs))}ms of request budget left; returning URL-sanitized streams without further probing.`);
+    return withoutDisprovenStreams(sortedStreams);
+  }
+
+  probeTargets.forEach((stream) => {
     // Already-settled probes resolve immediately; this is where work done during
     // collection gets picked up rather than repeated. A probe that starts here gets
     // the phase's own budget: the phase ends the wait regardless, so a shorter
@@ -1048,17 +1170,22 @@ async function validatePlayableStreams(streams, validator, validationController)
       })
       .finally(() => {
         completed += 1;
-        if (completed === streamsToValidate.length) {
+        if (completed === probeTargets.length) {
           resolveAllComplete('complete');
         }
       });
   });
 
+  // The timer is cleared once the race settles. Left armed, it held the event
+  // loop for the full deadline after the response had already been built.
+  let phaseTimer;
   const completionReason = await Promise.race([
     enoughConfirmedPromise,
     allCompletePromise,
-    new Promise((resolve) => setTimeout(() => resolve('timeout'), timeoutMs))
-  ]);
+    new Promise((resolve) => {
+      phaseTimer = setTimeout(() => resolve('timeout'), timeoutMs);
+    })
+  ]).finally(() => clearTimeout(phaseTimer));
 
   // Snapshot before aborting. Every probe that reached a verdict has already run
   // its handler; the ones abort() is about to cancel resolve later and must not be
@@ -1076,8 +1203,13 @@ async function validatePlayableStreams(streams, validator, validationController)
   // candidate cap, follow the confirmed streams instead of vanishing.
   const confirmed = sortStreams(playableStreams);
   const confirmedUrls = new Set(confirmed.map((stream) => stream.url));
+  // `decidedBad` only knows about the probes this phase awaited. A stream past the
+  // candidate cap, or on a host that went unhealthy, can still have been disproved
+  // by the eager pass during collection — the validator is what remembers that.
   const unproven = [...eligibleStreams, ...skippedStreams].filter((stream) => (
-    !confirmedUrls.has(stream.url) && !decidedBad.has(stream.url)
+    !confirmedUrls.has(stream.url)
+    && !decidedBad.has(stream.url)
+    && !validator.isDisproven(stream.url)
   ));
 
   if (completionReason === 'timeout' && confirmed.length > 0) {
@@ -1095,7 +1227,7 @@ async function validatePlayableStreams(streams, validator, validationController)
   if (sortedStreams.length > 0) {
     console.warn('Scraper orchestrator: Validation found no confirmed playable streams; returning URL-sanitized streams to avoid a false empty result.');
   }
-  return sortedStreams;
+  return withoutDisprovenStreams(sortedStreams);
 }
 
 /**
@@ -1103,6 +1235,11 @@ async function validatePlayableStreams(streams, validator, validationController)
  * Accepts IMDb ID or TMDB ID and queries all sources concurrently.
  */
 async function getStreamsUncached(type, id, season, episode) {
+  // Every phase below draws from this one clock, so the metadata lookups at the
+  // top are paid for out of the same budget as the scraping and the probing.
+  const startedAt = Date.now();
+  const remainingBudgetMs = () => TOTAL_REQUEST_BUDGET_MS - (Date.now() - startedAt);
+
   let title = '';
   let originalTitle = '';
   let year = null;
@@ -1209,9 +1346,16 @@ async function getStreamsUncached(type, id, season, episode) {
     const fastReturnGate = { recheck: () => {} };
     const validator = createStreamValidator(validationController.signal, () => fastReturnGate.recheck());
 
+    // Whatever the metadata lookups above spent comes out of collection's share,
+    // not out of the phases after it.
+    const collectionTimeoutMs = Math.max(
+      0,
+      Math.min(SCRAPER_COLLECTION_TIMEOUT_MS, remainingBudgetMs() - MIN_VALIDATION_PHASE_MS)
+    );
+
     const collection = await collectScraperResults(
       scraperTasks,
-      SCRAPER_COLLECTION_TIMEOUT_MS,
+      collectionTimeoutMs,
       (streams) => startEagerValidation(streams, validator),
       {
         getConfirmedCount: () => validator.confirmed,
@@ -1225,11 +1369,21 @@ async function getStreamsUncached(type, id, season, episode) {
     ), 0);
 
     if (collection.completionReason !== 'complete' && countStreams(collection.results) === 0) {
-      console.warn(`Scraper orchestrator: Partial collection had no streams; waiting up to ${EMPTY_RESULT_GRACE_MS}ms to avoid a false empty result.`);
-      await Promise.race([
-        collection.allCompletePromise,
-        delay(EMPTY_RESULT_GRACE_MS)
-      ]);
+      // The grace wait is worth having only if there is still time to use what it
+      // finds, so it takes what the budget leaves rather than a fixed 3500ms on
+      // top of everything already spent.
+      const graceMs = Math.min(
+        EMPTY_RESULT_GRACE_MS,
+        remainingBudgetMs() - MIN_VALIDATION_PHASE_MS
+      );
+
+      if (graceMs > 0) {
+        console.warn(`Scraper orchestrator: Partial collection had no streams; waiting up to ${Math.round(graceMs)}ms to avoid a false empty result.`);
+        await Promise.race([
+          collection.allCompletePromise,
+          delay(graceMs)
+        ]);
+      }
     }
 
     if (collection.completionReason !== 'complete') {
@@ -1261,7 +1415,7 @@ async function getStreamsUncached(type, id, season, episode) {
     // streams that were actually proven to play. A turboviplay master whose
     // variants no longer resolve scores 1, so it landed at the top of the list
     // and was the first thing a viewer clicked.
-    const selected = await validatePlayableStreams(sanitizedStreams, validator, validationController);
+    const selected = await validatePlayableStreams(sanitizedStreams, validator, validationController, remainingBudgetMs());
     // Cached Torrentio streams are the debrid-backed first choice. Keep their
     // final position stable even when host/quality ranking has reordered the
     // remaining direct-provider results during validation.

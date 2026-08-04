@@ -486,6 +486,16 @@ async function testUnverifiedStreamsAreStillOffered() {
       res.end('#EXTM3U\n#EXTINF:4,\nseg.ts\n');
       return;
     }
+    // The segment /good.m3u8 names. Validation follows a playlist through to a
+    // real media resource before calling it confirmed, so an origin that serves
+    // the playlist but 404s its only segment describes a stream that does not
+    // play — which is what this origin used to be, leaving nothing here for the
+    // "confirmed" case to confirm.
+    if (req.url.startsWith('/seg.ts')) {
+      res.writeHead(200, { 'Content-Type': 'video/mp2t' });
+      res.end(Buffer.alloc(188));
+      return;
+    }
     if (req.url.startsWith('/stalls')) {
       res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
       res.write('#EXTM3U\n');
