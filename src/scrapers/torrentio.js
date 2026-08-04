@@ -105,11 +105,23 @@ function torrentioResolutionTier(stream) {
   return null;
 }
 
+// Cap at 4: the best 2160p and 1080p cached result, plus up to two whose
+// release title doesn't advertise a resolution at all — common enough among
+// cached torrents that skipping them outright was leaving real streams on
+// the table.
+const MAX_UNKNOWN_RESOLUTION_STREAMS = 2;
+
 function selectTorrentioStreams(streams) {
-  return ['2160p', '1080p'].flatMap((tier) => {
+  const knownTier = ['2160p', '1080p'].flatMap((tier) => {
     const stream = streams.find((candidate) => torrentioResolutionTier(candidate) === tier);
     return stream ? [stream] : [];
   });
+
+  const unknownTier = streams
+    .filter((candidate) => torrentioResolutionTier(candidate) === null)
+    .slice(0, MAX_UNKNOWN_RESOLUTION_STREAMS);
+
+  return [...knownTier, ...unknownTier];
 }
 
 function toInternalStream(raw) {
