@@ -21,8 +21,12 @@ each one and calls that function.
 
 ## Providers included
 
-VidSrc, VidFast, VidLink, VidEasy, All-Wish, Castle, NetMirror, 4KHDHub-NEW,
-HDHub4u, UHDMovies, Torrentio.
+VidEasy, Peachify, StreamFlix, All-Wish, Castle, 4KHDHub-NEW, HDHub4u,
+UHDMovies, Torrentio.
+
+VidSrc, VidFast, VidLink, and NetMirror were tried and dropped — see the
+comments above `PROVIDERS` in `src/providers/index.js` for why each one was
+removed.
 
 **`vixsrc` was left out on purpose.** It's a 1.1MB bundle (vs. 12–45KB for
 the others) that pulls in `sqlite`, `worker_threads`, `http2` — a different

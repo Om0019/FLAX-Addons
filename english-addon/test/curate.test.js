@@ -50,8 +50,8 @@ test('at most 5 non-torrentio streams survive, most reliable provider first', ()
     entry('castle', '1080p'),
     entry('streamflix', '720p'),
     entry('videasy', '720p'),
-    entry('netmirror', null),
-    entry('peachify', 'HD')
+    entry('peachify', 'HD'),
+    entry('allwish', 'HD')
   ];
 
   const selected = curateStreams(entries);
@@ -59,19 +59,19 @@ test('at most 5 non-torrentio streams survive, most reliable provider first', ()
   assert.equal(selected.length, 5);
   assert.deepEqual(
     selected.map((item) => item.providerId),
-    ['hdhub4u', 'uhdmovies', '4khdhubnew', 'castle', 'netmirror']
+    ['hdhub4u', 'uhdmovies', '4khdhubnew', 'castle', 'streamflix']
   );
 });
 
 test('an unlabeled resolution still competes for a slot on its own merits', () => {
-  // netmirror's stream is a full adaptive HLS ladder with no single
+  // A provider's stream can be a full adaptive HLS ladder with no single
   // resolution to report - "unlabeled" is not the same as "worse", so it is
   // not excluded outright, only outranked by entries that do claim a tier.
-  const entries = [entry('hdhub4u', '1080p'), entry('netmirror', null)];
+  const entries = [entry('hdhub4u', '1080p'), entry('castle', null)];
 
   const selected = curateStreams(entries);
 
-  assert.deepEqual(selected.map((item) => item.providerId), ['hdhub4u', 'netmirror']);
+  assert.deepEqual(selected.map((item) => item.providerId), ['hdhub4u', 'castle']);
 });
 
 test('resolutionTier treats an unlabeled resolution the same as a below-720p one', () => {

@@ -22,25 +22,21 @@
  * cached result, that's a direct debrid-backed link and gets first pick, as
  * server.js's own torrentio handling reflects. Reliability here otherwise
  * reflects what was actually observed working: hdhub4u/uhdmovies/4khdhubnew/
- * castle consistently returned playable links in testing. netmirror sits
- * just below them - verified end to end (real HLS ladder, real audio
- * tracks, working segments) across several titles, but through a single
- * narrow path (Netflix/Prime/Hotstar/Disney search only, not a general
- * catalog), so it's trusted less than sources proven across a broader range
- * of content. streamflix is ranked below that: its links only state a
- * resolution when the release filename happens to carry one. videasy is
- * ranked lower still: most of its servers answer 404/500 on any given
- * title. peachify is last of the working sources; allwish is anime-only and
- * contributes nothing to anything else, so it costs nothing to leave in
- * rotation at the end.
+ * castle consistently returned playable links in testing. streamflix is
+ * ranked below that: its links only state a resolution when the release
+ * filename happens to carry one. videasy is ranked last of the working
+ * sources: most of its servers answer 404/500 on any given title, worse
+ * than peachify's own hit rate. allwish is anime-only and contributes
+ * nothing to anything else, so it costs nothing to leave in rotation at the
+ * end.
  *
- * vidlink, vidsrc and vidfast are absent deliberately - see the registry in
- * src/providers/index.js for what each one does now.
+ * netmirror, vidlink, vidsrc and vidfast are absent deliberately - see the
+ * registry in src/providers/index.js for what each one does now.
  */
 
 const PROVIDER_PRIORITY = [
-  'torrentio', 'hdhub4u', 'uhdmovies', '4khdhubnew', 'castle', 'netmirror',
-  'streamflix', 'videasy', 'peachify', 'allwish'
+  'torrentio', 'hdhub4u', 'uhdmovies', '4khdhubnew', 'castle',
+  'streamflix', 'peachify', 'videasy', 'allwish'
 ];
 
 const MAX_STREAMS = 5;
