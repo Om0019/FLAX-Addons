@@ -213,6 +213,7 @@ function testValidationDeadlinesFitTheirPhases() {
   const fast = constant('STREAM_VALIDATION_FAST_TIMEOUT_MS');
   const total = constant('STREAM_VALIDATION_TOTAL_TIMEOUT_MS');
   const collection = constant('SCRAPER_COLLECTION_TIMEOUT_MS');
+  const torrentio = constant('TORRENTIO_TIMEOUT_MS');
 
   assert.ok(fast <= total, `fast budget (${fast}ms) should not exceed the total budget (${total}ms)`);
   assert.ok(
@@ -222,6 +223,10 @@ function testValidationDeadlinesFitTheirPhases() {
   assert.ok(
     eager <= collection,
     `an eager probe (${eager}ms) must not outlast collection (${collection}ms)`
+  );
+  assert.ok(
+    collection > torrentio,
+    `collection (${collection}ms) must outlast Torrentio (${torrentio}ms)`
   );
 }
 

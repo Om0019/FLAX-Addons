@@ -12,10 +12,13 @@
 const path = require('path');
 const { configureTorrentioSettings } = require('../torrentio-settings');
 const { checkTorboxCached } = require('../torbox-cache');
+const { createTtlCache } = require('../../src/ttl-cache');
 
 configureTorrentioSettings();
 
 const PROVIDER_TIMEOUT_MS = 15000;
+const TORRENTIO_RESULT_CACHE_TTL_MS = 10 * 60 * 1000;
+const TORRENTIO_RESULT_CACHE_MAX_ENTRIES = 500;
 
 // vixsrc.js was deliberately left out: a 1.1MB bundle pulling in sqlite/
 // worker_threads/http2, ~16s per call in testing, and returned nothing.
@@ -48,6 +51,7 @@ const loaded = PROVIDERS.map((entry) => {
 // result can still be filtered as an actual TorBox cache hit. This must be
 // serialized because the adapter reads the global fetch function.
 let torrentioRequestQueue = Promise.resolve();
+const torrentioResultCache = createTtlCache({ maxEntries: TORRENTIO_RESULT_CACHE_MAX_ENTRIES });
 
 function isTorrentioCachedLabel(name) {
   return /(?:^|[^A-Z0-9])TB\+(?:$|[^A-Z0-9])/i.test(name || '');
@@ -59,10 +63,20 @@ function queueTorrentioRequest(task) {
   return result;
 }
 
+function torrentioCacheKey(tmdbId, mediaType, seasonNum, episodeNum) {
+  return [tmdbId, mediaType, seasonNum || '', episodeNum || ''].join(':');
+}
+
+function getCachedTorrentioStreams(key) {
+  const cached = torrentioResultCache.get(key);
+  return cached ? cached.map((stream) => ({ ...stream })) : null;
+}
+
 async function fetchTorrentioStreams(provider, tmdbId, mediaType, seasonNum, episodeNum, { diagnostics = false } = {}) {
   return queueTorrentioRequest(async () => {
     const originalFetch = global.fetch;
     let cacheStates = [];
+    const cacheKey = torrentioCacheKey(tmdbId, mediaType, seasonNum, episodeNum);
     const upstream = {
       httpStatus: null,
       streamCount: null,
@@ -93,7 +107,22 @@ async function fetchTorrentioStreams(provider, tmdbId, mediaType, seasonNum, epi
         ...stream,
         __torrentioCached: cacheStates[index] === true
       }));
+      if (decorated.length > 0) {
+        torrentioResultCache.set(
+          cacheKey,
+          decorated.map((stream) => ({ ...stream })),
+          TORRENTIO_RESULT_CACHE_TTL_MS
+        );
+      }
       return diagnostics ? { streams: decorated, upstream } : decorated;
+    } catch (error) {
+      const cached = getCachedTorrentioStreams(cacheKey);
+      if (!cached) throw error;
+
+      console.warn(`Torrentio: request failed (${error.message}); serving ${cached.length} cached result(s).`);
+      return diagnostics
+        ? { streams: cached, upstream: { ...upstream, servedFromCache: true } }
+        : cached;
     } finally {
       global.fetch = originalFetch;
     }

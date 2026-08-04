@@ -28,8 +28,10 @@ const SOLOLATINO_TIMEOUT_MS = 12000;
 // Torrentio's own debrid-resolution round trip runs behind whatever debrid
 // provider is configured, on top of its own torrent-indexer lookup, so it
 // gets a longer budget than the HTML scrapers.
-const TORRENTIO_TIMEOUT_MS = 12000;
-const SCRAPER_COLLECTION_TIMEOUT_MS = 11500;
+const TORRENTIO_TIMEOUT_MS = 15000;
+// This must outlast Torrentio's own deadline. Otherwise the collector returns
+// partial results and aborts Torrentio before its allowed request can settle.
+const SCRAPER_COLLECTION_TIMEOUT_MS = 15500;
 const EMPTY_RESULT_GRACE_MS = 3500;
 // Return as soon as this many sources have produced this many streams between
 // them. Requiring two sources rather than one keeps the early exit from simply
