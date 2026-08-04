@@ -102,7 +102,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     }
 
     const mediaType = type === 'series' ? 'tv' : 'movie';
-    const results = await fetchAllStreams(tmdb.id, imdbId, mediaType, season, episode, tmdb.title);
+    const results = await fetchAllStreams(tmdb.id, imdbId, mediaType, season, episode);
 
     const entries = results.flatMap(({ providerId, providerName, streams: providerStreams }) =>
       providerStreams.map((raw) => ({ providerId, providerName, raw, resolution: extractResolution(raw) }))

@@ -10,6 +10,8 @@
  */
 
 const path = require('path');
+const fs = require('fs');
+const Module = require('module');
 const { configureTorrentioSettings } = require('../torrentio-settings');
 const { checkTorboxCached } = require('../torbox-cache');
 
@@ -30,6 +32,7 @@ const PROVIDERS = [
   { id: 'vidlink', name: 'VidLink', file: 'vidlink.js' },
   { id: 'videasy', name: 'VidEasy', file: 'videasy.js' },
   { id: 'allwish', name: 'All-Wish', file: 'allwish.js' },
+  { id: 'castle', name: 'Castle', file: 'castle.js' },
   { id: 'netmirror', name: 'NetMirror', file: 'netmirror.js' },
   { id: '4khdhubnew', name: '4KHDHub', file: '4khdhubnew.js' },
   { id: 'hdhub4u', name: 'HDHub4u', file: 'hdhub4u.js' },
@@ -37,9 +40,55 @@ const PROVIDERS = [
   { id: 'torrentio', name: 'Torrentio', file: 'torrentio.js' }
 ];
 
+function loadStrictVendoredProvider(entry, file) {
+  let source = fs.readFileSync(file, 'utf8');
+
+  if (entry.id === 'hdhub4u') {
+    // Its original 0.3 score accepts partial matches such as "P.S. I Love
+    // You" for "I Love You Phillip Morris". This is the source selector,
+    // before it opens any download pages or emits streams.
+    source = source.replace('&&_0x9de7ca>0.3&&', '&&_0x9de7ca>=0.75&&');
+    // A failed selector must not silently become the first search result.
+    source = source.replace('_0x250433||_0x424e15[0x0]', '_0x250433');
+    source = source.replace(
+      '_0x8b1a29=_0x250433;console',
+      '_0x8b1a29=_0x250433;if(!_0x8b1a29)return[];console'
+    );
+  }
+
+  if (entry.id === 'castle') {
+    const helper = `function __englishStrictTitleMatch(candidate, target) {
+      const tokens = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ').filter((token) => token.length > 1 && !['a', 'an', 'and', 'for', 'in', 'of', 'the', 'to'].includes(token));
+      const wanted = [...new Set(tokens(target))];
+      if (wanted.length < 2) return false;
+      const found = new Set(tokens(candidate));
+      return wanted.filter((token) => found.has(token)).length >= Math.ceil(wanted.length * 0.75);
+    }\n`;
+    source = source.replace('function findCastleMovieId', `${helper}function findCastleMovieId`);
+    source = source.replace(
+      'if(_0x20be27[_0x1728f4(0x20b)](_0x4f2b66)||_0x4f2b66[_0x1728f4(0x20b)](_0x20be27)){',
+      'if(__englishStrictTitleMatch(_0x20be27,_0x4f2b66)){'
+    );
+    // No exact match must be an empty result, not the first search row.
+    source = source.replace(
+      /const _0x4d2a6e=_0x8a8050\[0x0\],[\s\S]*?throw new Error\(_0x1728f4\(0x24a\)\);/,
+      "throw new Error('No strict Castle title match');"
+    );
+  }
+
+  const patched = new Module(file, module);
+  patched.filename = file;
+  patched.paths = Module._nodeModulePaths(path.dirname(file));
+  patched._compile(source, file);
+  return patched.exports;
+}
+
 const loaded = PROVIDERS.map((entry) => {
   try {
-    const module = require(path.join(__dirname, '..', '..', 'providers', entry.file));
+    const file = path.join(__dirname, '..', '..', 'providers', entry.file);
+    const module = ['hdhub4u', 'castle'].includes(entry.id)
+      ? loadStrictVendoredProvider(entry, file)
+      : require(file);
     return { ...entry, module };
   } catch (error) {
     console.error(`Provider registry: failed to load ${entry.id}:`, error.message);
@@ -98,28 +147,6 @@ function withTimeout(promise, ms, label) {
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms))
   ]);
-}
-
-const TITLE_STOP_WORDS = new Set(['a', 'an', 'and', 'for', 'in', 'of', 'the', 'to']);
-const TITLE_GUARDED_PROVIDERS = new Set(['4khdhubnew', 'hdhub4u', 'uhdmovies']);
-
-function titleTokens(value) {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .split(' ')
-    .filter((token) => token.length > 1 && !TITLE_STOP_WORDS.has(token));
-}
-
-function streamMatchesTitle(stream, expectedTitle) {
-  const expected = [...new Set(titleTokens(expectedTitle))];
-  if (expected.length < 2) return true;
-
-  const actual = new Set(titleTokens(stream.title || stream.name));
-  const matched = expected.filter((token) => actual.has(token)).length;
-  // Requiring most meaningful title words rejects fuzzy lookalikes such as
-  // "P.S. I Love You" for "I Love You Phillip Morris".
-  return matched >= Math.ceil(expected.length * 0.75);
 }
 
 /**
@@ -210,7 +237,7 @@ async function diagnoseTorrentio(imdbId, mediaType, seasonNum, episodeNum) {
  * individual failures/timeouts, and returns { providerId, providerName,
  * streams }[] for whichever came back with results.
  */
-async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum, expectedTitle) {
+async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum) {
   const attempts = loaded.map(async (provider) => {
     try {
       let streams = provider.id === 'torrentio'
@@ -223,12 +250,6 @@ async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum,
       streams = Array.isArray(streams) ? streams : [];
       if (provider.id === 'torrentio') {
         streams = await filterCachedTorrentioStreams(streams);
-      } else if (TITLE_GUARDED_PROVIDERS.has(provider.id)) {
-        const before = streams.length;
-        streams = streams.filter((stream) => streamMatchesTitle(stream, expectedTitle));
-        if (streams.length !== before) {
-          console.warn(`${provider.name}: dropped ${before - streams.length} title-mismatched stream(s) for "${expectedTitle}".`);
-        }
       }
       return { providerId: provider.id, providerName: provider.name, streams };
     } catch (error) {
