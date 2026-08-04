@@ -16,6 +16,8 @@ const {
   extractStreamtapeStream,
   extractVidguardStream,
   extractVoeDirectStream,
+  extractAltchaGate,
+  solveAltchaChallenge,
   isDefunctHost,
   isPelisplusHost,
   isStreamtapeHost,
@@ -148,6 +150,109 @@ async function testVoeMirrorIsRecognisedByPayload() {
 
     assert.strictEqual(resolved, source, 'a VOE mirror on an unrecognised domain still resolves');
     assert.strictEqual(mirrorRequests, 1, 'the redirect is followed exactly once');
+  } finally {
+    server.close();
+  }
+}
+
+/**
+ * A fixed challenge whose PBKDF2 derivation at counter=0, cost=1 happens to start
+ * with the chosen 1-byte prefix — precomputed offline so the test never has to
+ * brute-force, and stays instant regardless of the machine running it.
+ */
+const ALTCHA_FIXTURE_CHALLENGE = {
+  parameters: {
+    algorithm: 'PBKDF2/SHA-256',
+    cost: 1,
+    keyLength: 32,
+    keyPrefix: 'a4',
+    nonce: '00112233445566778899aabbccddeeff0011223',
+    salt: 'abcdef0123456789'
+  },
+  signature: 'test-signature'
+};
+
+function buildAltchaGatePage(challengeUrl, csrfToken) {
+  return `<!DOCTYPE html><html><head><meta name="csrf-token" content="${csrfToken}"></head>` +
+    `<body><form method="POST" class="access-form">` +
+    `<input type="hidden" name="_token" value="${csrfToken}">` +
+    `<input type="hidden" name="access" value="0">` +
+    `<altcha-widget challenge="${challengeUrl}" hidefooter display="standard"></altcha-widget>` +
+    `</form></body></html>`;
+}
+
+function testAltchaGateIsDetected() {
+  const gatePage = buildAltchaGatePage('https://example.com/challenge/abc', 'tok-123');
+  assert.deepStrictEqual(
+    extractAltchaGate(gatePage),
+    { csrfToken: 'tok-123', challengeUrl: 'https://example.com/challenge/abc' },
+    'a gate page yields its CSRF token and challenge URL'
+  );
+
+  assert.strictEqual(
+    extractAltchaGate('<html><body>a normal player page</body></html>'),
+    null,
+    'a page without an altcha-widget is not mistaken for a gate'
+  );
+}
+
+function testAltchaChallengeSolves() {
+  const solution = solveAltchaChallenge(ALTCHA_FIXTURE_CHALLENGE.parameters);
+  assert.ok(solution, 'the fixture challenge is solved');
+  assert.strictEqual(solution.counter, 0, 'the precomputed fixture solves at counter 0');
+
+  const badPrefix = { ...ALTCHA_FIXTURE_CHALLENGE.parameters, keyPrefix: '0000' };
+  assert.strictEqual(
+    solveAltchaChallenge(badPrefix),
+    null,
+    'a longer-than-supported prefix is refused up front rather than searched'
+  );
+}
+
+// This is the actual failure mode this addon hit in practice: a VOE mirror
+// (matthewhotelscience.com at last check) serves an Altcha "confirm you're
+// human" gate instead of the player, and every VOE-backed stream came back
+// empty until the challenge was solved and POSTed back.
+async function testAltchaGateIsSolvedAndUnblocksVoeMirror() {
+  const source = 'https://delivery.example.net/engine/hls2/03/00071/master.m3u8?t=post-gate';
+  let postedBody = null;
+
+  const server = http.createServer((req, res) => {
+    const port = server.address().port;
+
+    if (req.url.startsWith('/challenge')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(ALTCHA_FIXTURE_CHALLENGE));
+      return;
+    }
+
+    if (req.method === 'POST' && req.url.startsWith('/e/gated')) {
+      let raw = '';
+      req.on('data', (chunk) => { raw += chunk; });
+      req.on('end', () => {
+        postedBody = new URLSearchParams(raw);
+        res.writeHead(200, { 'content-type': 'text/html' });
+        res.end(buildVoeMirrorPage({ source, direct_access_allowed: false }));
+      });
+      return;
+    }
+
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(buildAltchaGatePage(`http://127.0.0.1:${port}/challenge`, 'csrf-abc'));
+  });
+
+  await new Promise((resolve) => server.listen(0, resolve));
+
+  try {
+    const gatedUrl = `http://127.0.0.1:${server.address().port}/e/gated`;
+    const resolved = await resolvePlayerStream(gatedUrl, userAgent, 'https://sololatino.net/');
+
+    assert.strictEqual(resolved, source, 'the page behind the gate resolves once the challenge is solved');
+    assert.ok(postedBody, 'the solved challenge was POSTed back');
+    assert.strictEqual(postedBody.get('_token'), 'csrf-abc', 'the CSRF token from the gate page is carried through');
+
+    const submittedPayload = JSON.parse(Buffer.from(postedBody.get('altcha'), 'base64').toString('utf8'));
+    assert.strictEqual(submittedPayload.solution.counter, 0, 'the solved counter is submitted');
   } finally {
     server.close();
   }
@@ -699,6 +804,9 @@ async function run() {
     ['VOE payload decodes', testVoePayloadDecodes],
     ['VOE decode rejects unrelated pages', testVoeDecodeRejectsUnrelatedPages],
     ['VOE mirror recognised by payload', testVoeMirrorIsRecognisedByPayload],
+    ['Altcha gate is detected', testAltchaGateIsDetected],
+    ['Altcha challenge solves', testAltchaChallengeSolves],
+    ['Altcha gate is solved and unblocks VOE mirror', testAltchaGateIsSolvedAndUnblocksVoeMirror],
     ['VidGuard signature round-trips', testVidguardSignatureRoundTrips],
     ['VidGuard stream extraction', testVidguardStreamExtraction],
     ['MediaFire direct extraction', testMediafireDirectExtraction],
