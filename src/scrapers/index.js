@@ -1274,9 +1274,16 @@ async function getStreamsUncached(type, id, season, episode) {
     // variants no longer resolve scores 1, so it landed at the top of the list
     // and was the first thing a viewer clicked.
     const selected = await validatePlayableStreams(sanitizedStreams, validator, validationController);
+    // Cached Torrentio streams are the debrid-backed first choice. Keep their
+    // final position stable even when host/quality ranking has reordered the
+    // remaining direct-provider results during validation.
+    const torrentioFirst = [
+      ...selected.filter((stream) => stream.name === 'Torrentio'),
+      ...selected.filter((stream) => stream.name !== 'Torrentio')
+    ];
     // Labeling happens here rather than inside validatePlayableStreams, which has
     // three ways out: a label written twice reads as "1080p • 1080p".
-    return selected.map(withQualityLabel);
+    return torrentioFirst.map(withQualityLabel);
 
   } catch (err) {
     console.error('Error in combined getStreams:', err.message);
