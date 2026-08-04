@@ -22,7 +22,7 @@
  */
 
 const PROVIDER_PRIORITY = [
-  'torrentio', 'hdhub4u', 'uhdmovies', '4khdhubnew', 'castle', 'netmirror',
+  'torrentio', 'peachify', 'hdhub4u', 'uhdmovies', '4khdhubnew', 'castle', 'netmirror',
   'videasy', 'vidsrc', 'vidfast', 'vidlink', 'allwish'
 ];
 

@@ -7,7 +7,7 @@
 
 const TMDB_API_KEY = 'af3fa2d2239e9d0e6c04a1076d3df76f';
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
-const TMDB_TIMEOUT_MS = 5000;
+const TMDB_TIMEOUT_MS = 3000;
 
 async function fetchJson(url) {
   const controller = new AbortController();

@@ -17,8 +17,8 @@ const { checkTorboxCached } = require('../torbox-cache');
 
 configureTorrentioSettings();
 
-const PROVIDER_TIMEOUT_MS = 15000;
-const TORRENTIO_TIMEOUT_MS = 10000;
+const PROVIDER_TIMEOUT_MS = 8000;
+const TORRENTIO_TIMEOUT_MS = 6000;
 const TORRENTIO_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Stremio English Addon)',
   Accept: 'application/json'
@@ -31,6 +31,7 @@ const PROVIDERS = [
   { id: 'vidfast', name: 'VidFast', file: 'vidfast.js' },
   { id: 'vidlink', name: 'VidLink', file: 'vidlink.js' },
   { id: 'videasy', name: 'VidEasy', file: 'videasy.js' },
+  { id: 'peachify', name: 'Peachify', file: 'peachify.js' },
   { id: 'allwish', name: 'All-Wish', file: 'allwish.js' },
   { id: 'castle', name: 'Castle', file: 'castle.js' },
   { id: 'netmirror', name: 'NetMirror', file: 'netmirror.js' },

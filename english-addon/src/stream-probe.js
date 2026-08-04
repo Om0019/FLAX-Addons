@@ -3,7 +3,7 @@
 // set immediately before returning it to Stremio. This is deliberately a
 // range request: no media is downloaded during discovery.
 
-const STREAM_PROBE_TIMEOUT_MS = 4000;
+const STREAM_PROBE_TIMEOUT_MS = 2000;
 
 function usableUrl(url) {
   try {
@@ -26,18 +26,32 @@ async function probeStream(stream, { timeoutMs = STREAM_PROBE_TIMEOUT_MS } = {})
   try {
     const response = await fetch(stream.url, {
       method: 'GET',
-      // Preserve the source's required Referer/Origin/etc., while enforcing
-      // a tiny response body so probing does not consume the actual stream.
       headers: { ...(stream.headers || {}), Range: 'bytes=0-2047', Accept: '*/*' },
       redirect: 'follow',
       signal: controller.signal
     });
     const contentType = response.headers.get('content-type');
-    // A successful range or full response is sufficient. Some CDNs omit a
-    // media content-type, so only reject types that positively identify an
-    // error/document response.
-    return response.ok && !clearlyNotMedia(contentType);
-  } catch {
+    
+    // Explicitly dead links
+    if (response.status === 404 || response.status === 410) {
+      return false;
+    }
+    
+    // If it returned an HTML page (like a Cloudflare block or error page), drop it
+    if (clearlyNotMedia(contentType)) {
+      return false;
+    }
+    
+    // Otherwise, assume it's playable (many servers return 403/416 to probes but work in players)
+    return true;
+  } catch (error) {
+    // If it's an AbortError (timeout), we might be dropping a slow but working stream. 
+    // Let's keep it if it just timed out, as Stremio's player has longer timeouts.
+    if (error.name === 'AbortError') {
+      console.warn(`Probe timed out for ${stream.url}, keeping it anyway`);
+      return true;
+    }
+    // Network errors (DNS, connection refused, etc.) mean it's dead
     return false;
   } finally {
     clearTimeout(timeoutId);
