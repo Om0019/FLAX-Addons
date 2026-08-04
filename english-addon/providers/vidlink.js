@@ -1,1 +1,460 @@
-const _0x4d78f2=_0x2c1a;function _0x2c23(){const _0x523b48=['Bg9N','ihWGtwfPBIbnAxjYB3i','ANnVBG','l2vUyY12AwrSAw5Rp3rLEhq9','l2fWAs9Il21VDMLLlW','ndKYmJG1ELfnsLvb','yxv0BW','ngPoCwP5yq','C3rHCNrZv2L0Aa','CgXHEwXPC3q','ig1PBG','zxbPC29Kzv9YDw5FDgLTzq','A2vLCc1HBgL2zq','AgfZt3DUuhjVCgvYDhK','w1zPzgXPBMTDiezLDgnOAw5NihbSyxLSAxn0igzYB206ia','ihWG8j+mJsbpCMLNAw5HBcb8ipcFKR4G','zgvMAw5LuhjVCgvYDgLLCW','zxjYB3i','C3vIC3rYAw5N','mta4mhaGrKHe','Ahr0Chm6lY9HCgKUDgHLBw92AwvKyI5VCMCVmY8','qxv0BYbeEw5HBwLJ','Ahr0Chm6lY9LBMmTzgvJlMfWCc9HCgK','DgL0Bgu','mta4ma','Dgv4Da','zg9Uzq','odiYntq5yvn3vffW','mJe2mfa','mJu2nZKYveXKzKT2','nZiWua','zhvYyxrPB24','C3bSAxq','ChjVDg90ExbL','nZiWCcbira','nduGBwLU','zMLYC3rFywLYx2rHDgu','DMfSDwu','vMfYAwfIBguGu2L6zq','w00ZvtHDifbHCNnPBMCGBwfZDgvYig0ZDtG6ia','w1zPzgXPBMTDie5VigvUy3j5ChrLzcbjrcbYzxr1CM5Lza','w1zPzgXPBMTDievYCM9YoIa','BgvUz3rO','mZyW','cUkAOsa','neSGvuHe','w00ZvtHDievYCM9YihbHCNnPBMCGttnvocWGCMv0DxjUAw5NigvTChr5lG','Aw5JBhvKzxm','Dg9mB3DLCKnHC2u','w1zPzgXPBMTDiezHAwXLzcb0BYbWyxjZzsbLEhrYysbXDwfSAxrPzxmGzM9Yia','otaGBwLU','Ahr0Chm6lY92AwrSAw5RlNbYBW','y2fSBa','DgHYB3C','ogvxver1ta','ChjVCgvYDhLjC0vUDw1LCMfIBgu','mJe2ma','l2vWAxnVzguV','BMv4Da','vxnLCI1bz2vUDa','qxv0BW','ndeXmZyYner4thzgDa','ChvZAa','mtmZmZaYnNfWq2PmBa','B3jPz2LU','zMHK','ic0G','mJyYmJy5mgzbDwn1uq','nJHLmdK0nJK5nti1yJe4ytCWyMfImMy4nMiXzMe3mdy','p2fWAv9RzxK9','CNvUDgLTzq','DxjS','yxbWBhK','DgHLBG','nJCWmtGWs1HRsgfc','tI9b'];_0x2c23=function(){return _0x523b48;};return _0x2c23();}(function(_0x61193a,_0x334af4){const _0x1d1947={_0x2d0fd7:0x187,_0x35401c:0x1b6,_0x52732f:0x1a9,_0xb21edc:0x1ab},_0x3c87e8=_0x2c1a,_0x2788ce=_0x61193a();while(!![]){try{const _0x142824=parseInt(_0x3c87e8(0x1bf))/0x1*(parseInt(_0x3c87e8(0x189))/0x2)+parseInt(_0x3c87e8(_0x1d1947._0x2d0fd7))/0x3+-parseInt(_0x3c87e8(_0x1d1947._0x35401c))/0x4+-parseInt(_0x3c87e8(0x1bd))/0x5+-parseInt(_0x3c87e8(_0x1d1947._0x52732f))/0x6+parseInt(_0x3c87e8(0x1af))/0x7+-parseInt(_0x3c87e8(0x1a2))/0x8*(-parseInt(_0x3c87e8(_0x1d1947._0xb21edc))/0x9);if(_0x142824===_0x334af4)break;else _0x2788ce['push'](_0x2788ce['shift']());}catch(_0x3bf6c3){_0x2788ce['push'](_0x2788ce['shift']());}}}(_0x2c23,0x57a21));var __async=(_0x541021,_0x4133af,_0x4e4688)=>{const _0x4658ae={_0x5cf06d:0x1b4},_0x14d637={_0x50d1d7:0x1a6};return new Promise((_0x3914b8,_0x15cb6b)=>{const _0x40e13e=_0x2c1a;var _0x59c7e8=_0x297daa=>{const _0x3b0f26=_0x2c1a;try{_0x414964(_0x4e4688[_0x3b0f26(_0x14d637._0x50d1d7)](_0x297daa));}catch(_0x5656b8){_0x15cb6b(_0x5656b8);}},_0x18896d=_0xcfa585=>{try{_0x414964(_0x4e4688['throw'](_0xcfa585));}catch(_0x49e62a){_0x15cb6b(_0x49e62a);}},_0x414964=_0xcc0f3b=>_0xcc0f3b['done']?_0x3914b8(_0xcc0f3b[_0x40e13e(0x191)]):Promise['resolve'](_0xcc0f3b['value'])['then'](_0x59c7e8,_0x18896d);_0x414964((_0x4e4688=_0x4e4688[_0x40e13e(_0x4658ae._0x5cf06d)](_0x541021,_0x4133af))['next']());});},__defProp=Object['defineProperty'],__defProps=Object[_0x4d78f2(0x1c8)],__getOwnPropDescs=Object['getOwnPropertyDescriptors'],__getOwnPropSymbols=Object['getOwnPropertySymbols'],__hasOwnProp=Object['prototype'][_0x4d78f2(0x1c5)],__propIsEnum=Object[_0x4d78f2(0x18d)][_0x4d78f2(0x1a3)],__defNormalProp=(_0x2adf9c,_0x1da427,_0x2589c6)=>_0x1da427 in _0x2adf9c?__defProp(_0x2adf9c,_0x1da427,{'enumerable':!![],'configurable':!![],'writable':!![],'value':_0x2589c6}):_0x2adf9c[_0x1da427]=_0x2589c6,__spreadValues=(_0x48738e,_0x51c4c4)=>{const _0x1295e3=_0x4d78f2;for(var _0x1c55ae in _0x51c4c4||(_0x51c4c4={}))if(__hasOwnProp[_0x1295e3(0x1a0)](_0x51c4c4,_0x1c55ae))__defNormalProp(_0x48738e,_0x1c55ae,_0x51c4c4[_0x1c55ae]);if(__getOwnPropSymbols)for(var _0x1c55ae of __getOwnPropSymbols(_0x51c4c4)){if(__propIsEnum['call'](_0x51c4c4,_0x1c55ae))__defNormalProp(_0x48738e,_0x1c55ae,_0x51c4c4[_0x1c55ae]);}return _0x48738e;},__spreadProps=(_0x560518,_0x44c238)=>__defProps(_0x560518,__getOwnPropDescs(_0x44c238)),__async2=(_0xc3dbce,_0x519e1c,_0x29be60)=>{const _0x4b1b8c={_0x5e6688:0x1b4};return new Promise((_0x128a75,_0x4939c0)=>{const _0x52a740={_0x2c7c37:0x1a6},_0x37bc57=_0x2c1a;var _0x18594d=_0x7a5008=>{const _0x3c46a4=_0x2c1a;try{_0x2d029e(_0x29be60[_0x3c46a4(_0x52a740._0x2c7c37)](_0x7a5008));}catch(_0x1fa5e8){_0x4939c0(_0x1fa5e8);}},_0x124519=_0x38df2a=>{const _0x1f1735=_0x2c1a;try{_0x2d029e(_0x29be60[_0x1f1735(0x1a1)](_0x38df2a));}catch(_0x29a84f){_0x4939c0(_0x29a84f);}},_0x2d029e=_0x54316d=>_0x54316d[_0x37bc57(0x1d2)]?_0x128a75(_0x54316d['value']):Promise['resolve'](_0x54316d['value'])[_0x37bc57(0x1b5)](_0x18594d,_0x124519);_0x2d029e((_0x29be60=_0x29be60[_0x37bc57(_0x4b1b8c._0x5e6688)](_0xc3dbce,_0x519e1c))['next']());});},VIDLINK_API=_0x4d78f2(0x19f),DECRYPT_API=_0x4d78f2(0x1ce),TMDB_API_KEY=_0x4d78f2(0x1b0),HEADERS={'User-Agent':'Mozilla/5.0\x20(Windows\x20NT\x2010.0;\x20Win64;\x20x64)\x20AppleWebKit/537.36\x20(KHTML,\x20like\x20Gecko)\x20Chrome/122.0.0.0\x20Safari/537.36','Connection':_0x4d78f2(0x1c4),'Referer':'https://vidlink.pro/','Origin':_0x4d78f2(0x19f)};function formatBytes(_0x1d12de){const _0x318664=_0x4d78f2;if(!_0x1d12de||isNaN(_0x1d12de))return _0x318664(0x192);const _0x5de26c=['B','KB','MB','GB'];let _0x4321bd=0x0;while(_0x1d12de>=0x400&&_0x4321bd<_0x5de26c['length']-0x1){_0x1d12de/=0x400,_0x4321bd++;}return _0x1d12de['toFixed'](0x2)+'\x20'+_0x5de26c[_0x4321bd];}function calculateCalculatedFallbackSize(_0x43887c,_0x5cf79f){const _0x327021={_0xbbe2b2:0x19b},_0x255778=_0x4d78f2,_0x392511=parseInt(_0x5cf79f)||0x5a,_0x35a1f3=String(_0x43887c||'')[_0x255778(0x19c)]();let _0x3e68ae=0x1450;if(_0x35a1f3[_0x255778(_0x327021._0xbbe2b2)]('4k')||_0x35a1f3[_0x255778(_0x327021._0xbbe2b2)](_0x255778(0x1a4)))_0x3e68ae=0x3e80;else{if(_0x35a1f3['includes']('1080')||_0x35a1f3[_0x255778(0x19b)]('fhd'))_0x3e68ae=0x1450;else{if(_0x35a1f3['includes']('720')||_0x35a1f3['includes']('hd'))_0x3e68ae=0x9c4;else{if(_0x35a1f3['includes']('480')||_0x35a1f3[_0x255778(0x19b)]('sd'))_0x3e68ae=0x4b0;}}}const _0x255b95=0.94+_0x392511%0x9/0x64,_0x18c7b9=_0x3e68ae*_0x255b95*0x3e8/0x8*(_0x392511*0x3c);return formatBytes(_0x18c7b9);}function getTmdbMetadata(_0xde73a7,_0x276019,_0x109a4a,_0x1c3436){const _0x44cc41={_0x48e935:0x18f,_0x1b26b3:0x19e,_0x47f5da:0x1cc,_0x4952af:0x1b2,_0x26d82b:0x1b2,_0x331573:0x1b2,_0x53c411:0x1c2,_0x3eaad3:0x1c3};return __async(this,null,function*(){const _0x3eb519=_0x2c1a;let _0xca7c9b='Unknown\x20Title',_0xe71fc9=_0x276019==='tv'?_0x3eb519(_0x44cc41._0x48e935):_0x3eb519(_0x44cc41._0x1b26b3);try{const _0x4980e7=_0x276019==='movie'?'movie':'tv',_0xd7237c=_0x3eb519(_0x44cc41._0x47f5da)+_0x4980e7+'/'+_0xde73a7+_0x3eb519(0x1b1)+TMDB_API_KEY,_0x378228=yield fetch(_0xd7237c);if(!_0x378228['ok'])return{'name':_0xca7c9b,'year':'N/A','duration':_0xe71fc9};const _0x13183d=yield _0x378228[_0x3eb519(0x1ba)]();let _0x149b80=_0xe71fc9;if(_0x276019==='movie'&&_0x13183d[_0x3eb519(_0x44cc41._0x4952af)])_0x149b80=_0x13183d[_0x3eb519(0x1b2)]+'\x20min';else{if(_0x276019==='tv'){const _0x1c0bde='https://api.themoviedb.org/3/tv/'+_0xde73a7+'/season/'+_0x109a4a+_0x3eb519(0x1a5)+_0x1c3436+'?api_key='+TMDB_API_KEY,_0x28ee9b=yield fetch(_0x1c0bde);if(_0x28ee9b['ok']){const _0x39fc87=yield _0x28ee9b[_0x3eb519(0x1ba)]();if(_0x39fc87[_0x3eb519(_0x44cc41._0x26d82b)])_0x149b80=_0x39fc87[_0x3eb519(_0x44cc41._0x331573)]+_0x3eb519(_0x44cc41._0x53c411);else _0x13183d[_0x3eb519(_0x44cc41._0x3eaad3)]&&_0x13183d['episode_run_time'][_0x3eb519(0x196)]>0x0&&(_0x149b80=_0x13183d['episode_run_time'][0x0]+_0x3eb519(0x1c2));}}}return{'name':_0x13183d[_0x3eb519(0x1cf)]||_0x13183d['name']||_0xca7c9b,'year':(_0x13183d['release_date']||_0x13183d[_0x3eb519(0x190)]||'')[_0x3eb519(0x18c)]('-')[0x0]||'N/A','duration':_0x149b80};}catch(_0x31b79c){return{'name':_0xca7c9b,'year':_0x3eb519(0x1b7),'duration':_0xe71fc9};}});}function _0x2c1a(_0x43fa70,_0x31d75b){_0x43fa70=_0x43fa70-0x187;const _0x2c23c6=_0x2c23();let _0x2c1a4d=_0x2c23c6[_0x43fa70];if(_0x2c1a['yDfSex']===undefined){var _0x2badc9=function(_0x28e74b){const _0x39c6dc='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=';let _0x541021='',_0x4133af='';for(let _0x4e4688=0x0,_0x3914b8,_0x15cb6b,_0x59c7e8=0x0;_0x15cb6b=_0x28e74b['charAt'](_0x59c7e8++);~_0x15cb6b&&(_0x3914b8=_0x4e4688%0x4?_0x3914b8*0x40+_0x15cb6b:_0x15cb6b,_0x4e4688++%0x4)?_0x541021+=String['fromCharCode'](0xff&_0x3914b8>>(-0x2*_0x4e4688&0x6)):0x0){_0x15cb6b=_0x39c6dc['indexOf'](_0x15cb6b);}for(let _0x18896d=0x0,_0x414964=_0x541021['length'];_0x18896d<_0x414964;_0x18896d++){_0x4133af+='%'+('00'+_0x541021['charCodeAt'](_0x18896d)['toString'](0x10))['slice'](-0x2);}return decodeURIComponent(_0x4133af);};_0x2c1a['YsWNbC']=_0x2badc9,_0x2c1a['VZGbjx']={},_0x2c1a['yDfSex']=!![];}const _0x53c2ad=_0x2c23c6[0x0],_0x1a90f0=_0x43fa70+_0x53c2ad,_0x427a74=_0x2c1a['VZGbjx'][_0x1a90f0];return!_0x427a74?(_0x2c1a4d=_0x2c1a['YsWNbC'](_0x2c1a4d),_0x2c1a['VZGbjx'][_0x1a90f0]=_0x2c1a4d):_0x2c1a4d=_0x427a74,_0x2c1a4d;}function generateM3u8(_0x916c06){const _0x3666dc={_0x434cfc:0x1b8,_0x272a89:0x193,_0x1a65f4:0x1ca,_0x3e5bb5:0x18c,_0x1e85c5:0x1c0,_0x19426b:0x1ac,_0x50027e:0x1aa};return __async2(this,arguments,function*(_0x4742cc,_0xd3349={}){const _0x386999=_0x2c1a;try{console[_0x386999(_0x3666dc._0x434cfc)](_0x386999(_0x3666dc._0x272a89)+_0x4742cc);const _0x102033=yield fetch(_0x4742cc,{'headers':_0xd3349}),_0x56f9f3=yield _0x102033[_0x386999(0x1d1)](),_0x2948b6=_0x4742cc[_0x386999(_0x3666dc._0x1a65f4)](0x0,_0x4742cc['lastIndexOf']('/'))+'/',_0x2a8079=[],_0x3299ee=/#EXT-X-STREAM-INF:.*?RESOLUTION=(\d+x\d+).*?\n([^\n]+)/g;let _0x56e1ff;while((_0x56e1ff=_0x3299ee['exec'](_0x56f9f3))!==null){const _0x5595d7=parseInt(_0x56e1ff[0x1][_0x386999(_0x3666dc._0x3e5bb5)]('x')[0x1]);if(_0x5595d7<0x2d0)continue;const _0x2c6144=_0x5595d7+'p';let _0x3eff8d=_0x56e1ff[0x2]['trim']();if(!_0x3eff8d[_0x386999(_0x3666dc._0x1e85c5)]('http')){if(_0x3eff8d['startsWith']('/')){const _0x459239=new URL(_0x4742cc)[_0x386999(_0x3666dc._0x19426b)];_0x3eff8d=_0x459239+_0x3eff8d;}else _0x3eff8d=_0x2948b6+_0x3eff8d;}_0x2a8079[_0x386999(_0x3666dc._0x50027e)]({'quality':_0x2c6144,'url':_0x3eff8d});}return _0x2a8079;}catch(_0x6a895e){return console['warn'](_0x386999(0x19a),_0x6a895e),[];}});}function getStreams(_0x30be17,_0x3ab998,_0x456cb3,_0x25010e){const _0x27610a={_0x141b5f:0x1b8,_0x2f0ec7:0x1b8,_0x49655d:0x1bc,_0x5d5f56:0x19d};return __async2(this,null,function*(){const _0x3ca55a={_0x10e81a:0x1a4,_0x98441d:0x199,_0x26a653:0x188,_0x537e1e:0x19b,_0x2a32dc:0x18a,_0x576d87:0x1be,_0x3f565d:0x1b9,_0x136109:0x1ae,_0x4511a7:0x1aa},_0x497e5e=_0x2c1a;console[_0x497e5e(_0x27610a._0x141b5f)]('[Vidlink]\x20Fetching\x20streams\x20for\x20'+_0x3ab998+'\x20'+_0x30be17);try{const _0x498435=DECRYPT_API+_0x497e5e(0x1bb)+_0x30be17,_0x41d92f=yield fetch(_0x498435),_0x398de0=yield _0x41d92f['json'](),_0x3e0592=_0x398de0['result'];if(!_0x3e0592)return console[_0x497e5e(_0x27610a._0x2f0ec7)](_0x497e5e(0x194)),[];const _0x131462=_0x3ab998!=='tv'&&_0x456cb3==null,_0x249719=_0x131462?'movie':'tv',_0x3b42a1=yield getTmdbMetadata(_0x30be17,_0x249719,_0x456cb3,_0x25010e),_0x373493=_0x131462?VIDLINK_API+_0x497e5e(_0x27610a._0x49655d)+_0x3e0592:VIDLINK_API+'/api/b/tv/'+_0x3e0592+'/'+_0x456cb3+'/'+_0x25010e;console['log'](_0x497e5e(0x1c6)+_0x373493);const _0x38f503=yield fetch(_0x373493,{'headers':HEADERS}),_0x172337=yield _0x38f503['json'](),_0x38acbb=_0x172337&&_0x172337['stream']&&_0x172337['stream'][_0x497e5e(0x1c1)];if(!_0x38acbb)return console['log']('[Vidlink]\x20No\x20playlist\x20in\x20response'),[];const _0x5de6a0=[],_0x564c88=(_0x49bb74,_0x25f1fd)=>{const _0x3b1aed=_0x497e5e;let _0x27cf62=_0x3b1aed(0x1cb),_0x5bbc47='1080P';const _0x10d9ea=String(_0x49bb74)[_0x3b1aed(0x19c)]();if(_0x10d9ea['includes'](_0x3b1aed(_0x3ca55a._0x10e81a))||_0x10d9ea[_0x3b1aed(0x19b)]('4k'))_0x27cf62=_0x3b1aed(_0x3ca55a._0x98441d),_0x5bbc47=_0x3b1aed(_0x3ca55a._0x26a653);else{if(_0x10d9ea[_0x3b1aed(_0x3ca55a._0x537e1e)](_0x3b1aed(0x1d0)))_0x27cf62='1080p\x20FHD',_0x5bbc47='1080P';else{if(_0x10d9ea['includes']('720'))_0x27cf62=_0x3b1aed(0x18e),_0x5bbc47=_0x3b1aed(_0x3ca55a._0x2a32dc);else _0x10d9ea['includes'](_0x3b1aed(_0x3ca55a._0x576d87))&&(_0x27cf62=_0x3b1aed(0x1cd),_0x5bbc47=_0x3b1aed(0x1a8));}}const _0x4809b0=calculateCalculatedFallbackSize(_0x5bbc47,_0x3b42a1[_0x3b1aed(0x18b)]),_0x3d982b=_0x3b42a1['name']+(!_0x131462?'\x20S'+_0x456cb3+'E'+_0x25010e:''),_0x2406d9='VidLink\x20|\x20'+_0x27cf62+_0x3b1aed(_0x3ca55a._0x3f565d),_0x3adf33='🎬\x20'+_0x3d982b+_0x3b1aed(_0x3ca55a._0x136109)+_0x3b42a1['year']+_0x3b1aed(0x198)+_0x5bbc47+_0x3b1aed(0x1c7)+_0x4809b0+'\x0a🎞️\x20M3U8\x20|\x20⏱️\x20'+_0x3b42a1['duration']+'\x20|\x20📌\x20Main\x20Mirror';_0x5de6a0[_0x3b1aed(_0x3ca55a._0x4511a7)]({'name':_0x2406d9,'title':_0x3adf33,'url':_0x25f1fd,'quality':_0x49bb74,'type':'m3u8','headers':{'User-Agent':HEADERS[_0x3b1aed(0x1a7)],'Referer':VIDLINK_API+'/','Origin':VIDLINK_API},'provider':'vidlink'});};_0x564c88(_0x497e5e(0x1a8),_0x38acbb);try{const _0x514053=yield generateM3u8(_0x38acbb,{'Referer':VIDLINK_API+'/','User-Agent':HEADERS['User-Agent']});_0x514053['forEach'](_0x2d92db=>{const _0x2863a4=_0x497e5e;_0x564c88(_0x2d92db['quality'],_0x2d92db[_0x2863a4(0x1b3)]);});}catch(_0x3658a5){console['warn'](_0x497e5e(_0x27610a._0x5d5f56)+_0x38acbb);}return console[_0x497e5e(0x1b8)]('[Vidlink]\x20Found\x20playlist\x20stream'),_0x5de6a0['map'](_0x4f56f9=>__spreadProps(__spreadValues({},_0x4f56f9),{'quality':getSortedQuality(_0x4f56f9['quality'])}));}catch(_0x5856c2){return console[_0x497e5e(0x1c9)](_0x497e5e(0x195)+_0x5856c2['message']),[];}});}function getSortedQuality(_0x464a66){const _0x22a2a7={_0x5093e4:0x19c,_0x52fae2:0x19b,_0x218bbf:0x19b,_0x5ba2d9:0x1ad},_0x2e6313=_0x4d78f2;if(!_0x464a66)return'Auto';const _0x3084f6=_0x464a66[_0x2e6313(_0x22a2a7._0x5093e4)]();if(_0x3084f6[_0x2e6313(_0x22a2a7._0x52fae2)]('auto'))return _0x2e6313(0x1a8);if(_0x3084f6[_0x2e6313(0x19b)](_0x2e6313(0x1a4))||_0x3084f6['includes']('4k')||_0x3084f6[_0x2e6313(0x19b)]('uhd'))return'​'+_0x464a66;if(_0x3084f6[_0x2e6313(_0x22a2a7._0x218bbf)](_0x2e6313(0x1d0))||_0x3084f6[_0x2e6313(0x19b)](_0x2e6313(_0x22a2a7._0x5ba2d9)))return'​​'+_0x464a66;if(_0x3084f6[_0x2e6313(0x19b)]('720')||_0x3084f6['includes']('hd'))return'​​​'+_0x464a66;if(_0x3084f6['includes']('480')||_0x3084f6['includes']('sd'))return'​​​​'+_0x464a66;if(_0x3084f6['includes'](_0x2e6313(0x197)))return'​​​​​'+_0x464a66;return'​​​​'+_0x464a66;}module['exports']={'getStreams':getStreams};
+/**
+ * vidlink - Built from src/vidlink/
+ * Generated: 2025-12-31T21:23:16.719Z
+ */
+"use strict";
+var __defProp = Object.defineProperty;
+var __defProps = Object.defineProperties;
+var __getOwnPropDescs = Object.getOwnPropertyDescriptors;
+var __getOwnPropSymbols = Object.getOwnPropertySymbols;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __propIsEnum = Object.prototype.propertyIsEnumerable;
+var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+var __spreadValues = (a, b) => {
+  for (var prop in b || (b = {}))
+    if (__hasOwnProp.call(b, prop))
+      __defNormalProp(a, prop, b[prop]);
+  if (__getOwnPropSymbols)
+    for (var prop of __getOwnPropSymbols(b)) {
+      if (__propIsEnum.call(b, prop))
+        __defNormalProp(a, prop, b[prop]);
+    }
+  return a;
+};
+var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
+var __async = (__this, __arguments, generator) => {
+  return new Promise((resolve, reject) => {
+    var fulfilled = (value) => {
+      try {
+        step(generator.next(value));
+      } catch (e) {
+        reject(e);
+      }
+    };
+    var rejected = (value) => {
+      try {
+        step(generator.throw(value));
+      } catch (e) {
+        reject(e);
+      }
+    };
+    var step = (x) => x.done ? resolve(x.value) : Promise.resolve(x.value).then(fulfilled, rejected);
+    step((generator = generator.apply(__this, __arguments)).next());
+  });
+};
+
+// src/vidlink/constants.js
+var TMDB_API_KEY = "68e094699525b18a70bab2f86b1fa706";
+var ENC_DEC_API = "https://enc-dec.app/api";
+var VIDLINK_API = "https://vidlink.pro/api/b";
+var VIDLINK_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+  "Connection": "keep-alive",
+  "Referer": "https://vidlink.pro/",
+  "Origin": "https://vidlink.pro"
+};
+
+// src/vidlink/http.js
+function makeRequest(_0) {
+  return __async(this, arguments, function* (url, options = {}) {
+    const defaultHeaders = __spreadValues({
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+      "Accept": "application/json,*/*",
+      "Accept-Language": "en-US,en;q=0.5",
+      "Accept-Encoding": "gzip, deflate",
+      "Connection": "keep-alive"
+    }, options.headers);
+    try {
+      const response = yield fetch(url, __spreadValues({
+        method: options.method || "GET",
+        headers: defaultHeaders
+      }, options));
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      return response;
+    } catch (error) {
+      console.error(`[Vidlink] Request failed for ${url}: ${error.message}`);
+      throw error;
+    }
+  });
+}
+
+// src/vidlink/tmdb.js
+function getTmdbInfo(tmdbId, mediaType) {
+  return __async(this, null, function* () {
+    var _a, _b;
+    const endpoint = mediaType === "tv" ? "tv" : "movie";
+    const url = `https://api.themoviedb.org/3/${endpoint}/${tmdbId}?api_key=${TMDB_API_KEY}`;
+    const response = yield makeRequest(url);
+    const data = yield response.json();
+    const title = mediaType === "tv" ? data.name : data.title;
+    const year = mediaType === "tv" ? (_a = data.first_air_date) == null ? void 0 : _a.substring(0, 4) : (_b = data.release_date) == null ? void 0 : _b.substring(0, 4);
+    if (!title) {
+      throw new Error("Could not extract title from TMDB response");
+    }
+    console.log(`[Vidlink] TMDB Info: "${title}" (${year})`);
+    return { title, year, data };
+  });
+}
+function encryptTmdbId(tmdbId) {
+  return __async(this, null, function* () {
+    console.log(`[Vidlink] Encrypting TMDB ID: ${tmdbId}`);
+    const response = yield makeRequest(`${ENC_DEC_API}/enc-vidlink?text=${tmdbId}`);
+    const data = yield response.json();
+    if (data && data.result) {
+      console.log(`[Vidlink] Successfully encrypted TMDB ID`);
+      return data.result;
+    } else {
+      throw new Error("Invalid encryption response format");
+    }
+  });
+}
+
+// src/vidlink/m3u8.js
+function resolveUrl(url, baseUrl) {
+  if (url.startsWith("http")) {
+    return url;
+  }
+  try {
+    return new URL(url, baseUrl).toString();
+  } catch (error) {
+    console.error(`[Vidlink] Could not resolve URL: ${url} against ${baseUrl}`);
+    return url;
+  }
+}
+function getQualityFromResolution(resolution) {
+  if (!resolution)
+    return "Auto";
+  const [, height] = resolution.split("x").map(Number);
+  if (height >= 2160)
+    return "4K";
+  if (height >= 1440)
+    return "1440p";
+  if (height >= 1080)
+    return "1080p";
+  if (height >= 720)
+    return "720p";
+  if (height >= 480)
+    return "480p";
+  if (height >= 360)
+    return "360p";
+  return "240p";
+}
+function parseM3U8(content, baseUrl) {
+  const lines = content.split("\n").map((line) => line.trim()).filter((line) => line);
+  const streams = [];
+  let currentStream = null;
+  for (const line of lines) {
+    if (line.startsWith("#EXT-X-STREAM-INF:")) {
+      currentStream = { bandwidth: null, resolution: null, url: null };
+      const bandwidthMatch = line.match(/BANDWIDTH=(\d+)/);
+      if (bandwidthMatch) {
+        currentStream.bandwidth = parseInt(bandwidthMatch[1]);
+      }
+      const resolutionMatch = line.match(/RESOLUTION=(\d+x\d+)/);
+      if (resolutionMatch) {
+        currentStream.resolution = resolutionMatch[1];
+      }
+    } else if (currentStream && !line.startsWith("#")) {
+      currentStream.url = resolveUrl(line, baseUrl);
+      streams.push(currentStream);
+      currentStream = null;
+    }
+  }
+  return streams;
+}
+function fetchAndParseM3U8(playlistUrl, mediaInfo, subtitles) {
+  return __async(this, null, function* () {
+    console.log(`[Vidlink] Fetching M3U8 playlist: ${playlistUrl.substring(0, 80)}...`);
+    try {
+      const response = yield makeRequest(playlistUrl, { headers: VIDLINK_HEADERS });
+      const m3u8Content = yield response.text();
+      console.log(`[Vidlink] Parsing M3U8 content`);
+      const parsedStreams = parseM3U8(m3u8Content, playlistUrl);
+      if (parsedStreams.length === 0) {
+        console.log("[Vidlink] No quality variants found, returning master playlist");
+        return [{
+          name: "Vidlink - Auto",
+          title: mediaInfo.title,
+          url: playlistUrl,
+          quality: "Auto",
+          size: "Unknown",
+          headers: VIDLINK_HEADERS,
+          provider: "vidlink",
+          subtitles: subtitles || []
+        }];
+      }
+      console.log(`[Vidlink] Found ${parsedStreams.length} quality variants`);
+      return parsedStreams.map((stream) => {
+        const quality = getQualityFromResolution(stream.resolution);
+        return {
+          name: `Vidlink - ${quality}`,
+          title: mediaInfo.title,
+          url: stream.url,
+          quality,
+          size: "Unknown",
+          headers: VIDLINK_HEADERS,
+          provider: "vidlink",
+          subtitles: subtitles || []
+        };
+      });
+    } catch (error) {
+      console.error(`[Vidlink] Error fetching/parsing M3U8: ${error.message}`);
+      return [{
+        name: "Vidlink - Auto",
+        title: mediaInfo.title,
+        url: playlistUrl,
+        quality: "Auto",
+        size: "Unknown",
+        headers: VIDLINK_HEADERS,
+        provider: "vidlink",
+        subtitles: subtitles || []
+      }];
+    }
+  });
+}
+
+// src/vidlink/processor.js
+function extractQuality(streamData) {
+  if (!streamData)
+    return "Unknown";
+  const qualityFields = ["quality", "resolution", "label", "name"];
+  for (const field of qualityFields) {
+    if (streamData[field]) {
+      const quality = streamData[field].toString().toLowerCase();
+      if (quality.includes("2160") || quality.includes("4k"))
+        return "4K";
+      if (quality.includes("1440") || quality.includes("2k"))
+        return "1440p";
+      if (quality.includes("1080") || quality.includes("fhd"))
+        return "1080p";
+      if (quality.includes("720") || quality.includes("hd"))
+        return "720p";
+      if (quality.includes("480") || quality.includes("sd"))
+        return "480p";
+      if (quality.includes("360"))
+        return "360p";
+      if (quality.includes("240"))
+        return "240p";
+      const match = quality.match(/(\d{3,4})[pP]?/);
+      if (match) {
+        const resolution = parseInt(match[1]);
+        if (resolution >= 2160)
+          return "4K";
+        if (resolution >= 1440)
+          return "1440p";
+        if (resolution >= 1080)
+          return "1080p";
+        if (resolution >= 720)
+          return "720p";
+        if (resolution >= 480)
+          return "480p";
+        if (resolution >= 360)
+          return "360p";
+        return "240p";
+      }
+    }
+  }
+  return "Unknown";
+}
+function createStreamTitle(mediaInfo) {
+  if (mediaInfo.mediaType === "tv" && mediaInfo.season && mediaInfo.episode) {
+    return `${mediaInfo.title} S${String(mediaInfo.season).padStart(2, "0")}E${String(mediaInfo.episode).padStart(2, "0")}`;
+  }
+  return mediaInfo.year ? `${mediaInfo.title} (${mediaInfo.year})` : mediaInfo.title;
+}
+function processVidlinkResponse(data, mediaInfo) {
+  const streams = [];
+  try {
+    console.log(`[Vidlink] Processing response data`);
+    const streamTitle = createStreamTitle(mediaInfo);
+    const subtitles = [];
+    const rawSubtitles = data.subtitles || data.stream && data.stream.subtitles || data.captions || data.stream && data.stream.captions || [];
+    if (Array.isArray(rawSubtitles)) {
+      rawSubtitles.forEach((sub) => {
+        if (sub.url) {
+          subtitles.push({
+            url: sub.url,
+            language: sub.language || sub.lang || sub.label || "Unknown",
+            name: sub.name || sub.label || sub.language || sub.lang || "Unknown",
+            headers: VIDLINK_HEADERS
+          });
+        }
+      });
+    }
+    if (data.stream && data.stream.qualities) {
+      console.log(`[Vidlink] Processing qualities from stream object`);
+      Object.entries(data.stream.qualities).forEach(([qualityKey, qualityData]) => {
+        if (qualityData.url) {
+          const quality = extractQuality({ quality: qualityKey });
+          streams.push({
+            name: `Vidlink - ${quality}`,
+            title: streamTitle,
+            url: qualityData.url,
+            quality,
+            size: "Unknown",
+            headers: VIDLINK_HEADERS,
+            provider: "vidlink",
+            subtitles
+          });
+        }
+      });
+      if (data.stream.playlist) {
+        streams.push({
+          _isPlaylist: true,
+          url: data.stream.playlist,
+          mediaInfo: __spreadProps(__spreadValues({}, mediaInfo), { title: streamTitle }),
+          subtitles
+        });
+      }
+    } else if (data.stream && data.stream.playlist && !data.stream.qualities) {
+      console.log(`[Vidlink] Processing playlist-only response`);
+      streams.push({
+        _isPlaylist: true,
+        url: data.stream.playlist,
+        mediaInfo: __spreadProps(__spreadValues({}, mediaInfo), { title: streamTitle }),
+        subtitles
+      });
+    } else if (data.url) {
+      const quality = extractQuality(data);
+      streams.push({
+        name: `Vidlink - ${quality}`,
+        title: streamTitle,
+        url: data.url,
+        quality,
+        size: "Unknown",
+        headers: VIDLINK_HEADERS,
+        provider: "vidlink",
+        subtitles
+      });
+    } else if (data.streams && Array.isArray(data.streams)) {
+      data.streams.forEach((stream, index) => {
+        if (stream.url) {
+          const quality = extractQuality(stream);
+          streams.push({
+            name: `Vidlink Stream ${index + 1} - ${quality}`,
+            title: streamTitle,
+            url: stream.url,
+            quality,
+            size: stream.size || "Unknown",
+            headers: VIDLINK_HEADERS,
+            provider: "vidlink",
+            subtitles
+          });
+        }
+      });
+    } else if (data.links && Array.isArray(data.links)) {
+      data.links.forEach((link, index) => {
+        if (link.url) {
+          const quality = extractQuality(link);
+          streams.push({
+            name: `Vidlink Link ${index + 1} - ${quality}`,
+            title: streamTitle,
+            url: link.url,
+            quality,
+            size: link.size || "Unknown",
+            headers: VIDLINK_HEADERS,
+            provider: "vidlink",
+            subtitles
+          });
+        }
+      });
+    } else if (typeof data === "object") {
+      const findUrls = (obj) => {
+        for (const [key, value] of Object.entries(obj)) {
+          if (typeof value === "string" && (value.startsWith("http") || value.includes(".m3u8"))) {
+            if (value.includes(".srt") || value.includes(".vtt") || value.includes("subtitle") || value.includes("captions") || key.toLowerCase().includes("subtitle") || key.toLowerCase().includes("caption")) {
+              continue;
+            }
+            const quality = extractQuality({ [key]: value });
+            streams.push({
+              name: `Vidlink ${key} - ${quality}`,
+              title: streamTitle,
+              url: value,
+              quality,
+              size: "Unknown",
+              headers: VIDLINK_HEADERS,
+              provider: "vidlink",
+              subtitles
+            });
+          } else if (typeof value === "object" && value !== null) {
+            if (!key.toLowerCase().includes("caption") && !key.toLowerCase().includes("subtitle")) {
+              findUrls(value);
+            }
+          }
+        }
+      };
+      findUrls(data);
+    }
+    console.log(`[Vidlink] Extracted ${streams.length} streams from response`);
+  } catch (error) {
+    console.error(`[Vidlink] Error processing response: ${error.message}`);
+  }
+  return streams;
+}
+
+// src/vidlink/index.js
+var QUALITY_ORDER = {
+  "4K": 5,
+  "1440p": 4,
+  "1080p": 3,
+  "720p": 2,
+  "480p": 1,
+  "360p": 0,
+  "240p": -1,
+  "Auto": -2,
+  "Unknown": -3
+};
+function getStreams(tmdbId, mediaType = "movie", seasonNum = null, episodeNum = null) {
+  return __async(this, null, function* () {
+    console.log(`[Vidlink] Fetching streams for TMDB ID: ${tmdbId}, Type: ${mediaType}${mediaType === "tv" ? `, S:${seasonNum}E:${episodeNum}` : ""}`);
+    try {
+      const { title, year } = yield getTmdbInfo(tmdbId, mediaType);
+      const encryptedId = yield encryptTmdbId(tmdbId);
+      let vidlinkUrl;
+      if (mediaType === "tv" && seasonNum && episodeNum) {
+        vidlinkUrl = `${VIDLINK_API}/tv/${encryptedId}/${seasonNum}/${episodeNum}`;
+      } else {
+        vidlinkUrl = `${VIDLINK_API}/movie/${encryptedId}`;
+      }
+      console.log(`[Vidlink] Requesting: ${vidlinkUrl}`);
+      const response = yield makeRequest(vidlinkUrl, { headers: VIDLINK_HEADERS });
+      const data = yield response.json();
+      console.log(`[Vidlink] Received response from Vidlink API`);
+      const mediaInfo = {
+        title,
+        year,
+        mediaType,
+        season: seasonNum,
+        episode: episodeNum
+      };
+      const streams = processVidlinkResponse(data, mediaInfo);
+      if (streams.length === 0) {
+        console.log("[Vidlink] No streams found in response");
+        return [];
+      }
+      const playlistStreams = streams.filter((s) => s._isPlaylist);
+      const directStreams = streams.filter((s) => !s._isPlaylist);
+      if (playlistStreams.length > 0) {
+        console.log(`[Vidlink] Processing ${playlistStreams.length} M3U8 playlists`);
+        const playlistPromises = playlistStreams.map(
+          (ps) => fetchAndParseM3U8(ps.url, ps.mediaInfo, ps.subtitles)
+        );
+        const parsedStreamArrays = yield Promise.all(playlistPromises);
+        const allStreams = directStreams.concat(...parsedStreamArrays);
+        allStreams.sort((a, b) => (QUALITY_ORDER[b.quality] || -3) - (QUALITY_ORDER[a.quality] || -3));
+        console.log(`[Vidlink] Successfully processed ${allStreams.length} total streams`);
+        return allStreams;
+      } else {
+        directStreams.sort((a, b) => (QUALITY_ORDER[b.quality] || -3) - (QUALITY_ORDER[a.quality] || -3));
+        console.log(`[Vidlink] Successfully processed ${directStreams.length} streams`);
+        return directStreams;
+      }
+    } catch (error) {
+      console.error(`[Vidlink] Error in getStreams: ${error.message}`);
+      return [];
+    }
+  });
+}
+module.exports = { getStreams };
