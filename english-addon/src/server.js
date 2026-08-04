@@ -19,6 +19,9 @@ const REQUEST_BUDGET_MS = 12000;
 // Below this there is no point starting another probe: it would abort on arrival
 // and, because a timed-out probe is kept rather than dropped, teach us nothing.
 const MIN_PROBE_BUDGET_MS = 400;
+// Cap on Torrentio results with no resolution in their release title, kept
+// alongside the one 4K and one 1080p pick (4 Torrentio streams max).
+const TORRENTIO_UNKNOWN_RESOLUTION_LIMIT = 2;
 
 const MANIFEST = {
   id: 'org.stremio.english-addon',
@@ -138,20 +141,26 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     ));
     // Torrentio is an additional cached-debrid option, not one of the two
     // regular provider slots per resolution. Keep its first 4K and 1080p
-    // result, then curate all other providers independently at two distinct
-    // indexers per tier.
+    // result, plus up to two whose release title doesn't advertise a
+    // resolution at all (common enough among cached torrents to be worth
+    // surfacing rather than dropping), then curate all other providers
+    // independently at two distinct indexers per tier.
     //
     // Expressed as a function of the still-viable entries rather than computed
     // once, because the probe below re-runs it after dropping dead links. That
     // is what keeps the per-tier and per-provider limits — including Torrentio's
-    // one slot per tier here — true of the final response and not merely of the
-    // first guess at it.
+    // slots here — true of the final response and not merely of the first
+    // guess at it.
     const curate = (available) => {
       const torrentioEntries = available.filter((entry) => entry.providerId === 'torrentio');
-      const torrentioCurated = ['2160p', '1080p'].flatMap((tier) => {
+      const torrentioKnownTier = ['2160p', '1080p'].flatMap((tier) => {
         const stream = torrentioEntries.find((entry) => resolutionTier(entry.resolution) === tier);
         return stream ? [stream] : [];
       });
+      const torrentioUnknownTier = torrentioEntries
+        .filter((entry) => entry.resolution === null)
+        .slice(0, TORRENTIO_UNKNOWN_RESOLUTION_LIMIT);
+      const torrentioCurated = [...torrentioKnownTier, ...torrentioUnknownTier];
       return [
         ...torrentioCurated,
         ...curateStreams(available.filter((entry) => entry.providerId !== 'torrentio'))

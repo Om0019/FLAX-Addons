@@ -23,7 +23,7 @@ const {
   withQualityLabel
 } = require('../quality');
 
-const SCRAPER_COLLECTION_TIMEOUT_MS = 11500;
+const SCRAPER_COLLECTION_TIMEOUT_MS = 8500;
 // Every per-source budget has to end strictly before collection does, with room
 // to spare: a source whose own deadline lands after the collection deadline can
 // never report at all, so it is permanently "pending" as far as the fast-return
@@ -107,12 +107,11 @@ const ALTERNATIVE_TITLES_MAX_WAIT_MS = 1500;
 // Ceiling on everything one uncached lookup may spend, measured from the moment
 // it starts — TMDB included. Each phase had its own deadline and none of them
 // knew about the others, so the worst case was additive: metadata, then up to
-// 1500ms for alternative titles, then 11500ms of collection, then 3500ms of
-// empty-result grace, then 3200ms of validation. Roughly 18s, which is past the
-// point where a Stremio client has given up and the whole response is wasted.
-// The phases now draw from what is left of this instead of each starting a fresh
-// clock.
-const TOTAL_REQUEST_BUDGET_MS = 15000;
+// 1500ms for alternative titles, then collection, then empty-result grace, then
+// validation. The phases now draw from what is left of this instead of each
+// starting a fresh clock. Matched to the English addon's REQUEST_BUDGET_MS so
+// both addons give a Stremio client the same worst-case wait.
+const TOTAL_REQUEST_BUDGET_MS = 12000;
 // Below this there is not enough time left for a probe to mean anything: it would
 // time out on arrival, return nothing usable, and still record a timeout against
 // the host's health. Under this much remaining budget the validation phase uses
