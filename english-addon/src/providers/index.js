@@ -59,19 +59,26 @@ function queueTorrentioRequest(task) {
   return result;
 }
 
-async function fetchTorrentioStreams(provider, tmdbId, mediaType, seasonNum, episodeNum) {
+async function fetchTorrentioStreams(provider, tmdbId, mediaType, seasonNum, episodeNum, { diagnostics = false } = {}) {
   return queueTorrentioRequest(async () => {
     const originalFetch = global.fetch;
     let cacheStates = [];
+    const upstream = {
+      httpStatus: null,
+      streamCount: null,
+      cachedLabelCount: null
+    };
 
     global.fetch = async (...args) => {
       const response = await originalFetch(...args);
       const url = String(args[0]);
       if (url.includes('torrentio.strem.fun/') && url.includes('/stream/')) {
+        upstream.httpStatus = response.status;
         const payload = await response.clone().json().catch(() => null);
-        cacheStates = Array.isArray(payload?.streams)
-          ? payload.streams.slice(0, 15).map((stream) => isTorrentioCachedLabel(stream.name))
-          : [];
+        const upstreamStreams = Array.isArray(payload?.streams) ? payload.streams : [];
+        upstream.streamCount = payload ? upstreamStreams.length : null;
+        upstream.cachedLabelCount = upstreamStreams.filter((stream) => isTorrentioCachedLabel(stream.name)).length;
+        cacheStates = upstreamStreams.slice(0, 15).map((stream) => isTorrentioCachedLabel(stream.name));
       }
       return response;
     };
@@ -82,10 +89,11 @@ async function fetchTorrentioStreams(provider, tmdbId, mediaType, seasonNum, epi
         PROVIDER_TIMEOUT_MS,
         provider.id
       );
-      return (Array.isArray(streams) ? streams : []).map((stream, index) => ({
+      const decorated = (Array.isArray(streams) ? streams : []).map((stream, index) => ({
         ...stream,
         __torrentioCached: cacheStates[index] === true
       }));
+      return diagnostics ? { streams: decorated, upstream } : decorated;
     } finally {
       global.fetch = originalFetch;
     }
@@ -128,6 +136,62 @@ async function filterCachedTorrentioStreams(streams) {
     .map((stream) => ({ ...stream, __cached: true }));
 }
 
+function torrentioResolutionTier(stream) {
+  const value = `${stream.quality || ''} ${stream.title || ''} ${stream.name || ''}`.toLowerCase();
+  if (/\b(2160p|2160|4k)\b/.test(value)) return '2160p';
+  if (/\b(1080p|1080)\b/.test(value)) return '1080p';
+  if (/\b(720p|720)\b/.test(value)) return '720p';
+  return 'other';
+}
+
+// Intentionally exposes counts only: no source URLs, raw titles, hashes, or
+// debrid credentials. It shares the normal Torrentio request path so its
+// measurements reflect the same upstream response and cache filtering.
+async function diagnoseTorrentio(tmdbId, mediaType, seasonNum, episodeNum) {
+  const provider = loaded.find((entry) => entry.id === 'torrentio');
+  const startedAt = Date.now();
+  const settings = global.SCRAPER_SETTINGS || {};
+
+  if (!provider) {
+    return { loaded: false, elapsedMs: Date.now() - startedAt };
+  }
+
+  try {
+    const { streams, upstream } = await fetchTorrentioStreams(
+      provider, tmdbId, mediaType, seasonNum, episodeNum, { diagnostics: true }
+    );
+    const cachedStreams = await filterCachedTorrentioStreams(streams);
+    const cachedByResolution = { '2160p': 0, '1080p': 0, '720p': 0, other: 0 };
+    for (const stream of cachedStreams) {
+      cachedByResolution[torrentioResolutionTier(stream)] += 1;
+    }
+
+    return {
+      loaded: true,
+      debridProvider: settings.debridProvider || null,
+      debridKeyPresent: Boolean(settings.debridKey),
+      upstream,
+      adapterStreamCount: streams.length,
+      cachedStreamCount: cachedStreams.length,
+      cachedByResolution,
+      selectedTiers: {
+        '2160p': cachedByResolution['2160p'] > 0,
+        '1080p': cachedByResolution['1080p'] > 0
+      },
+      elapsedMs: Date.now() - startedAt
+    };
+  } catch (error) {
+    console.warn('Torrentio diagnostics failed:', error.message);
+    return {
+      loaded: true,
+      debridProvider: settings.debridProvider || null,
+      debridKeyPresent: Boolean(settings.debridKey),
+      error: 'torrentio_request_failed',
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+}
+
 /**
  * Calls every loaded provider's getStreams in parallel, tolerating
  * individual failures/timeouts, and returns { providerId, providerName,
@@ -157,4 +221,4 @@ async function fetchAllStreams(tmdbId, mediaType, seasonNum, episodeNum) {
   return Promise.all(attempts);
 }
 
-module.exports = { PROVIDERS, fetchAllStreams };
+module.exports = { PROVIDERS, fetchAllStreams, diagnoseTorrentio };

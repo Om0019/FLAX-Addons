@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const { findByImdbId } = require('./tmdb');
-const { PROVIDERS, fetchAllStreams } = require('./providers');
+const { PROVIDERS, fetchAllStreams, diagnoseTorrentio } = require('./providers');
 const { extractContainer, extractResolution, formatStreamName, formatStreamDescription } = require('./stream-template');
 const { curateStreams, resolutionTier } = require('./curate');
 
@@ -21,6 +21,55 @@ const MANIFEST = {
 
 app.get('/manifest.json', (req, res) => {
   res.json(MANIFEST);
+});
+
+function parseStreamRequest(type, id) {
+  if (type !== 'movie' && type !== 'series') {
+    return { error: 'Unsupported type' };
+  }
+
+  const [imdbId, seasonStr, episodeStr] = id.split(':');
+  if (!/^tt\d+$/.test(imdbId)) {
+    return { error: 'Unsupported id format' };
+  }
+
+  const season = type === 'series' ? Number(seasonStr) : null;
+  const episode = type === 'series' ? Number(episodeStr) : null;
+  if (type === 'series' && (!Number.isInteger(season) || !Number.isInteger(episode))) {
+    return { error: 'Missing season/episode' };
+  }
+
+  return { imdbId, season, episode };
+}
+
+// This route is deliberately not advertised in the manifest. It only returns
+// aggregate diagnostics and is disabled unless a deployment provides a token.
+app.get('/diagnostics/torrentio/:type/:id.json', async (req, res) => {
+  const token = process.env.DIAGNOSTICS_TOKEN;
+  if (!token) return res.sendStatus(404);
+  if (req.get('authorization') !== `Bearer ${token}`) return res.sendStatus(401);
+
+  const parsed = parseStreamRequest(req.params.type, req.params.id);
+  if (parsed.error) return res.status(400).json({ err: parsed.error });
+
+  try {
+    const tmdb = await findByImdbId(parsed.imdbId, req.params.type);
+    if (!tmdb) return res.status(404).json({ err: 'TMDB match not found' });
+
+    const mediaType = req.params.type === 'series' ? 'tv' : 'movie';
+    const torrentio = await diagnoseTorrentio(tmdb.id, mediaType, parsed.season, parsed.episode);
+    return res.json({
+      imdbId: parsed.imdbId,
+      tmdbId: tmdb.id,
+      mediaType,
+      season: parsed.season,
+      episode: parsed.episode,
+      torrentio
+    });
+  } catch (error) {
+    console.error(`English addon: Torrentio diagnostics failed for ${req.params.id}:`, error.message);
+    return res.status(500).json({ err: 'Internal error' });
+  }
 });
 
 function normalizeStream(raw, providerName) {
@@ -45,20 +94,9 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   const { type } = req.params;
   const id = req.params.id;
 
-  if (type !== 'movie' && type !== 'series') {
-    return res.status(400).json({ err: 'Unsupported type' });
-  }
-
-  const [imdbId, seasonStr, episodeStr] = id.split(':');
-  if (!/^tt\d+$/.test(imdbId)) {
-    return res.status(400).json({ err: 'Unsupported id format' });
-  }
-
-  const season = type === 'series' ? Number(seasonStr) : null;
-  const episode = type === 'series' ? Number(episodeStr) : null;
-  if (type === 'series' && (!Number.isInteger(season) || !Number.isInteger(episode))) {
-    return res.status(400).json({ err: 'Missing season/episode' });
-  }
+  const parsed = parseStreamRequest(type, id);
+  if (parsed.error) return res.status(400).json({ err: parsed.error });
+  const { imdbId, season, episode } = parsed;
 
   try {
     const tmdb = await findByImdbId(imdbId, type);
