@@ -509,6 +509,38 @@ function normalizeNetuEmbedUrl(url, referer) {
   }
 }
 
+// hglink.to ("HLSWish", a StreamWish rebrand) is a front door: its own page is a
+// ~70KB bespoke-obfuscated loader with no static redirect target — no
+// location.href, no assigned variable, nothing the existing redirect regexes can
+// see, because the navigation happens inside that obfuscated script rather than
+// in the page's markup. Actually running that script to observe where it goes
+// is not worth the risk it'd bring (arbitrary third-party JS executing with this
+// process's privileges) for what turns out to be an unnecessary step anyway:
+// hglink.to's own /e/<id> path always exists, unfetched, on vibuxer.com under
+// the identical id — confirmed live by fetching hglink.to's target through an
+// actual browser (getting routed to a *different* mirror, audinifer.com, that
+// happened to serve the identical branded page) and separately fetching
+// vibuxer.com directly for the same id (no visit to hglink.to at all), which
+// served the same content. So the front door can be skipped by substituting the
+// hostname before ever requesting it, landing on a page this file's own generic
+// extractDirectStream already decodes (a Dean Edwards packed script) without any
+// hglink.to-specific extraction logic at all.
+const WISH_FRONT_DOOR_HOSTS = { 'hglink.to': 'vibuxer.com' };
+
+function normalizeWishFrontDoorUrl(url) {
+  const host = getHostname(url).replace(/^www\./, '');
+  const mirror = WISH_FRONT_DOOR_HOSTS[host];
+  if (!mirror) return url;
+
+  try {
+    const parsed = new URL(url);
+    parsed.hostname = mirror;
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 /**
  * Rewrites a wrapper URL to the path its host actually serves a player on, before
  * anything is fetched.
@@ -516,6 +548,8 @@ function normalizeNetuEmbedUrl(url, referer) {
 function normalizeEmbedUrl(url, referer) {
   if (isNetuFamilyHost(url)) return normalizeNetuEmbedUrl(url, referer);
   if (isEmbedPathHost(url)) return toEmbedPathUrl(url);
+  const wishMirrorUrl = normalizeWishFrontDoorUrl(url);
+  if (wishMirrorUrl !== url) return wishMirrorUrl;
   return url;
 }
 

@@ -258,6 +258,33 @@ async function testAltchaGateIsSolvedAndUnblocksVoeMirror() {
   }
 }
 
+// hglink.to's own page is a bespoke-obfuscated loader with no static redirect
+// target this file's regexes can see; the navigation happens inside that script,
+// not in the markup. Confirmed live that hglink.to's /e/<id> always exists,
+// unfetched, on vibuxer.com under the identical id, so the front door is skipped
+// entirely by rewriting the hostname before the first request — landing on a
+// page this file's own generic extractDirectStream already decodes.
+function testWishFrontDoorIsRewrittenToItsMirror() {
+  assert.strictEqual(
+    normalizeEmbedUrl('https://hglink.to/e/abc123?x=1', 'https://sololatino.net/'),
+    'https://vibuxer.com/e/abc123?x=1',
+    'hglink.to is rewritten to its known-working mirror, path and query intact'
+  );
+
+  assert.strictEqual(
+    normalizeEmbedUrl('https://www.hglink.to/e/abc123', 'https://sololatino.net/'),
+    'https://vibuxer.com/e/abc123',
+    'a www. prefix on the front door is still recognised'
+  );
+
+  const unrelated = 'https://vidhide.com/e/abc123';
+  assert.strictEqual(
+    normalizeEmbedUrl(unrelated, 'https://sololatino.net/'),
+    unrelated,
+    'a host that is not a known wish front door is left untouched'
+  );
+}
+
 function testVidguardSignatureRoundTrips() {
   const realSig = 'aGVsbG8tdmlkZ3VhcmQtc2ln';
   const obfuscated = encodeVidguardSignature(realSig);
@@ -807,6 +834,7 @@ async function run() {
     ['Altcha gate is detected', testAltchaGateIsDetected],
     ['Altcha challenge solves', testAltchaChallengeSolves],
     ['Altcha gate is solved and unblocks VOE mirror', testAltchaGateIsSolvedAndUnblocksVoeMirror],
+    ['Wish front door is rewritten to its mirror', testWishFrontDoorIsRewrittenToItsMirror],
     ['VidGuard signature round-trips', testVidguardSignatureRoundTrips],
     ['VidGuard stream extraction', testVidguardStreamExtraction],
     ['MediaFire direct extraction', testMediafireDirectExtraction],
