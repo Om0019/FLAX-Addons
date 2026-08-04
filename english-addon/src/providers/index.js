@@ -49,20 +49,14 @@ const TORRENTIO_HEADERS = {
 //   vidsrc   - resolves its RCP server and then scrapes 0 streams; likewise
 //              0 on 4/4 titles.
 //
-// netmirror had the same shape of bug - its net27.cc path also says
-// `"mode":"proxy"`/`"direct":false` and points at the same refused CDN - but
-// it turned out fixable: providers/netmirror.js is no longer the
-// All-in-One-Nuvio original. It's a newer build (from yoruix/nuvio-providers)
-// that drops the net27.cc attempt and goes straight to a working fallback
-// path already present, but unreachable, in the original file. See that
-// file's docblock for how it was verified.
+// netmirror was dropped: providers/netmirror.js and its docblock above are
+// history now, not a currently-loaded provider.
 const PROVIDERS = [
   { id: 'videasy', name: 'VidEasy', file: 'videasy.js' },
   { id: 'peachify', name: 'Peachify', file: 'peachify.js' },
   { id: 'streamflix', name: 'StreamFlix', file: 'streamflix.js' },
   { id: 'allwish', name: 'All-Wish', file: 'allwish.js' },
   { id: 'castle', name: 'Castle', file: 'castle.js' },
-  { id: 'netmirror', name: 'NetMirror', file: 'netmirror.js' },
   { id: '4khdhubnew', name: '4KHDHub', file: '4khdhubnew.js' },
   { id: 'hdhub4u', name: 'HDHub4u', file: 'hdhub4u.js' },
   { id: 'uhdmovies', name: 'UHDMovies', file: 'uhdmovies.js' },
