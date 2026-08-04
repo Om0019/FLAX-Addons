@@ -6,7 +6,7 @@
  * through in `options.tmdbId` — it already resolves one for every request
  * anyway.
  *
- * Torrentio is constrained to Spanish-language indexers before it returns
+ * Torrentio is constrained to Latino-language sources before it returns
  * results. Their labels often omit an explicit audio tag, so source selection
  * is the reliable language signal; only their already-cached `TB+` entries
  * are returned. (english-addon/ uses the same vendored file without these
@@ -23,7 +23,7 @@ const { configureTorrentioSettings } = require('../torrentio-settings');
 
 configureTorrentioSettings();
 
-const TORRENTIO_LANGUAGE_CONFIG = 'providers=mejortorrent,wolfmax4k,cinecalidad|language=latino,spanish';
+const TORRENTIO_LANGUAGE_CONFIG = 'providers=cinecalidad|language=latino';
 let torrentioRequestQueue = Promise.resolve();
 
 function queueTorrentioRequest(task) {
@@ -35,8 +35,8 @@ function queueTorrentioRequest(task) {
 /**
  * The vendored provider only supplies the debrid segment (for example,
  * `torbox=<key>`) to Torrentio. Add Torrentio's language-preference segment
- * before that request is made, so its results come only from Spanish-language
- * indexers. The vendored provider reads global fetch, so calls are serialized
+ * before that request is made, so its results come only from the
+ * Latino-focused Cinecalidad indexer. The vendored provider reads global fetch, so calls are serialized
  * while its request is temporarily rewritten.
  */
 async function getSpanishPreferredStreams(tmdbId, mediaType, season, episode) {
@@ -139,10 +139,10 @@ async function scrape(title, originalTitle, year, type, season, episode, options
   try {
     const rawStreams = await getSpanishPreferredStreams(tmdbId, mediaType, season, episode);
     // getSpanishPreferredStreams has already restricted this response to
-    // Spanish-source, `TB+` cached entries before the vendor reformats them.
+    // Latino-source, `TB+` cached entries before the vendor reformats them.
     const spanishStreams = selectTorrentioStreams(rawStreams || []);
 
-    console.log(`Torrentio: ${rawStreams?.length || 0} Spanish-source stream(s) total, ${spanishStreams.length} cached high-quality`);
+    console.log(`Torrentio: ${rawStreams?.length || 0} Latino-source stream(s) total, ${spanishStreams.length} cached high-quality`);
 
     return spanishStreams.map(toInternalStream).filter((stream) => Boolean(stream.url));
   } catch (error) {
