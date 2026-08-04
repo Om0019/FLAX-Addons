@@ -85,28 +85,4 @@ function curateStreams(entries) {
   return selected;
 }
 
-/**
- * Entries that curation passed over, in the order they would have been chosen
- * next. Curation runs before the playability probe, so when a tier's picks turn
- * out to be dead the tier goes empty even though a lower-ranked provider had a
- * working link for it — the link was discarded before anything was probed. This
- * is the reserve the caller draws on to refill those gaps.
- *
- * Ordered by the same tier-then-provider ranking curation itself uses, so
- * refilling walks the same preference order rather than an arbitrary one.
- */
-function curationRunnersUp(entries, selected) {
-  const chosen = new Set(selected);
-  const tierOrder = [...PRIMARY_TIERS, FALLBACK_TIER];
-
-  return entries
-    .filter((entry) => !chosen.has(entry))
-    .map((entry) => ({ entry, tier: resolutionTier(entry.resolution) }))
-    .sort((a, b) => (
-      (tierOrder.indexOf(a.tier) - tierOrder.indexOf(b.tier))
-      || (providerRank(a.entry.providerId) - providerRank(b.entry.providerId))
-    ))
-    .map(({ entry }) => entry);
-}
-
-module.exports = { curateStreams, curationRunnersUp, resolutionTier };
+module.exports = { curateStreams, resolutionTier };
