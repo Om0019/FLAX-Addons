@@ -42,13 +42,9 @@ function parseStreamRequest(type, id) {
   return { imdbId, season, episode };
 }
 
-// This route is deliberately not advertised in the manifest. It only returns
-// aggregate diagnostics and is disabled unless a deployment provides a token.
+// This route is deliberately not advertised in the manifest. It returns only
+// aggregate diagnostics: never source URLs, hashes, or debrid credentials.
 app.get('/diagnostics/torrentio/:type/:id.json', async (req, res) => {
-  const token = process.env.DIAGNOSTICS_TOKEN;
-  if (!token) return res.sendStatus(404);
-  if (req.get('authorization') !== `Bearer ${token}`) return res.sendStatus(401);
-
   const parsed = parseStreamRequest(req.params.type, req.params.id);
   if (parsed.error) return res.status(400).json({ err: parsed.error });
 
