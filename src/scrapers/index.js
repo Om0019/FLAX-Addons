@@ -9,6 +9,7 @@ const pelispedia = require('./pelispedia');
 const tlnovelas = require('./tlnovelas');
 const novelas360 = require('./novelas360');
 const ennovelas = require('./ennovelas');
+const embed69 = require('./embed69');
 const torrentio = require('./torrentio');
 const { fetchTextWithTimeout, normalizeUrl } = require('../http');
 const { hasBlockedIpLiteralHost } = require('../net-guard');
@@ -1328,6 +1329,7 @@ async function getStreamsUncached(type, id, season, episode) {
       createScraperTask(tlnovelas, 'TLNovelas', buildScraperArgs('TLNovelas', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
       createScraperTask(novelas360, 'Novelas360', buildScraperArgs('Novelas360', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
       createScraperTask(ennovelas, 'Ennovelas', buildScraperArgs('Ennovelas', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
+      createScraperTask(embed69, 'Embed69', buildScraperArgs('Embed69', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles, { tmdbId }),
       createScraperTask(torrentio, 'Torrentio', buildScraperArgs('Torrentio', title, originalTitle, year, type, season, episode), TORRENTIO_TIMEOUT_MS, extraTitles, { tmdbId })
     ];
 
