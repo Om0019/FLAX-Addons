@@ -53,7 +53,7 @@ app.get('/diagnostics/torrentio/:type/:id.json', async (req, res) => {
     if (!tmdb) return res.status(404).json({ err: 'TMDB match not found' });
 
     const mediaType = req.params.type === 'series' ? 'tv' : 'movie';
-    const torrentio = await diagnoseTorrentio(tmdb.id, mediaType, parsed.season, parsed.episode);
+    const torrentio = await diagnoseTorrentio(parsed.imdbId, mediaType, parsed.season, parsed.episode);
     return res.json({
       imdbId: parsed.imdbId,
       tmdbId: tmdb.id,
@@ -102,7 +102,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     }
 
     const mediaType = type === 'series' ? 'tv' : 'movie';
-    const results = await fetchAllStreams(tmdb.id, mediaType, season, episode);
+    const results = await fetchAllStreams(tmdb.id, imdbId, mediaType, season, episode);
 
     const entries = results.flatMap(({ providerId, providerName, streams: providerStreams }) =>
       providerStreams.map((raw) => ({ providerId, providerName, raw, resolution: extractResolution(raw) }))

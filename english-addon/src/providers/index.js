@@ -12,13 +12,15 @@
 const path = require('path');
 const { configureTorrentioSettings } = require('../torrentio-settings');
 const { checkTorboxCached } = require('../torbox-cache');
-const { createTtlCache } = require('../../../src/ttl-cache');
 
 configureTorrentioSettings();
 
 const PROVIDER_TIMEOUT_MS = 15000;
-const TORRENTIO_RESULT_CACHE_TTL_MS = 10 * 60 * 1000;
-const TORRENTIO_RESULT_CACHE_MAX_ENTRIES = 500;
+const TORRENTIO_TIMEOUT_MS = 10000;
+const TORRENTIO_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Stremio English Addon)',
+  Accept: 'application/json'
+};
 
 // vixsrc.js was deliberately left out: a 1.1MB bundle pulling in sqlite/
 // worker_threads/http2, ~16s per call in testing, and returned nothing.
@@ -46,87 +48,50 @@ const loaded = PROVIDERS.map((entry) => {
   }
 }).filter(Boolean);
 
-// The vendored Torrentio adapter reformats its response and drops the upstream
-// `TB+` marker. Capture that marker while its request is in flight so the
-// result can still be filtered as an actual TorBox cache hit. This must be
-// serialized because the adapter reads the global fetch function.
-let torrentioRequestQueue = Promise.resolve();
-const torrentioResultCache = createTtlCache({ maxEntries: TORRENTIO_RESULT_CACHE_MAX_ENTRIES });
-
 function isTorrentioCachedLabel(name) {
   return /(?:^|[^A-Z0-9])TB\+(?:$|[^A-Z0-9])/i.test(name || '');
 }
 
-function queueTorrentioRequest(task) {
-  const result = torrentioRequestQueue.then(task, task);
-  torrentioRequestQueue = result.catch(() => {});
-  return result;
-}
+// The old vendored adapter first did another TMDB lookup and temporarily
+// replaced global.fetch, forcing every cold English lookup through one queue.
+// We already have the IMDb id at the HTTP boundary, so call Torrentio directly:
+// one request, no global state, no queue, and a real abortable deadline.
+async function fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum, { diagnostics = false } = {}) {
+  const settings = global.SCRAPER_SETTINGS || {};
+  if (!settings.debridProvider || !settings.debridKey) {
+    throw new Error('Torrentio debrid settings are unavailable');
+  }
 
-function torrentioCacheKey(tmdbId, mediaType, seasonNum, episodeNum) {
-  return [tmdbId, mediaType, seasonNum || '', episodeNum || ''].join(':');
-}
+  const contentId = mediaType === 'tv'
+    ? `series/${imdbId}:${seasonNum}:${episodeNum}`
+    : `movie/${imdbId}`;
+  const debrid = `${encodeURIComponent(settings.debridProvider)}=${encodeURIComponent(settings.debridKey)}`;
+  const url = `https://torrentio.strem.fun/${debrid}/stream/${contentId}.json`;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TORRENTIO_TIMEOUT_MS);
+  const upstream = { httpStatus: null, streamCount: null, cachedLabelCount: null };
 
-function getCachedTorrentioStreams(key) {
-  const cached = torrentioResultCache.get(key);
-  return cached ? cached.map((stream) => ({ ...stream })) : null;
-}
-
-async function fetchTorrentioStreams(provider, tmdbId, mediaType, seasonNum, episodeNum, { diagnostics = false } = {}) {
-  return queueTorrentioRequest(async () => {
-    const originalFetch = global.fetch;
-    let cacheStates = [];
-    const cacheKey = torrentioCacheKey(tmdbId, mediaType, seasonNum, episodeNum);
-    const upstream = {
-      httpStatus: null,
-      streamCount: null,
-      cachedLabelCount: null
-    };
-
-    global.fetch = async (...args) => {
-      const response = await originalFetch(...args);
-      const url = String(args[0]);
-      if (url.includes('torrentio.strem.fun/') && url.includes('/stream/')) {
-        upstream.httpStatus = response.status;
-        const payload = await response.clone().json().catch(() => null);
-        const upstreamStreams = Array.isArray(payload?.streams) ? payload.streams : [];
-        upstream.streamCount = payload ? upstreamStreams.length : null;
-        upstream.cachedLabelCount = upstreamStreams.filter((stream) => isTorrentioCachedLabel(stream.name)).length;
-        cacheStates = upstreamStreams.slice(0, 15).map((stream) => isTorrentioCachedLabel(stream.name));
-      }
-      return response;
-    };
-
-    try {
-      const streams = await withTimeout(
-        Promise.resolve(provider.module.getStreams(tmdbId, mediaType, seasonNum, episodeNum)),
-        PROVIDER_TIMEOUT_MS,
-        provider.id
-      );
-      const decorated = (Array.isArray(streams) ? streams : []).map((stream, index) => ({
-        ...stream,
-        __torrentioCached: cacheStates[index] === true
-      }));
-      if (decorated.length > 0) {
-        torrentioResultCache.set(
-          cacheKey,
-          decorated.map((stream) => ({ ...stream })),
-          TORRENTIO_RESULT_CACHE_TTL_MS
-        );
-      }
-      return diagnostics ? { streams: decorated, upstream } : decorated;
-    } catch (error) {
-      const cached = getCachedTorrentioStreams(cacheKey);
-      if (!cached) throw error;
-
-      console.warn(`Torrentio: request failed (${error.message}); serving ${cached.length} cached result(s).`);
-      return diagnostics
-        ? { streams: cached, upstream: { ...upstream, servedFromCache: true } }
-        : cached;
-    } finally {
-      global.fetch = originalFetch;
-    }
-  });
+  try {
+    const response = await fetch(url, { headers: TORRENTIO_HEADERS, signal: controller.signal });
+    upstream.httpStatus = response.status;
+    const payload = await response.json().catch(() => null);
+    const upstreamStreams = Array.isArray(payload?.streams) ? payload.streams : [];
+    upstream.streamCount = payload ? upstreamStreams.length : null;
+    upstream.cachedLabelCount = upstreamStreams.filter((stream) => isTorrentioCachedLabel(stream.name)).length;
+    const streams = upstreamStreams.slice(0, 15).map((stream) => ({
+      name: stream.name || 'Torrentio',
+      title: stream.title || stream.name || 'Torrentio',
+      url: stream.url,
+      infoHash: stream.infoHash,
+      __torrentioCached: isTorrentioCachedLabel(stream.name)
+    })).filter((stream) => Boolean(stream.url));
+    return diagnostics ? { streams, upstream } : streams;
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error(`Torrentio timed out after ${TORRENTIO_TIMEOUT_MS}ms`);
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 function withTimeout(promise, ms, label) {
@@ -176,7 +141,7 @@ function torrentioResolutionTier(stream) {
 // Intentionally exposes counts only: no source URLs, raw titles, hashes, or
 // debrid credentials. It shares the normal Torrentio request path so its
 // measurements reflect the same upstream response and cache filtering.
-async function diagnoseTorrentio(tmdbId, mediaType, seasonNum, episodeNum) {
+async function diagnoseTorrentio(imdbId, mediaType, seasonNum, episodeNum) {
   const provider = loaded.find((entry) => entry.id === 'torrentio');
   const startedAt = Date.now();
   const settings = global.SCRAPER_SETTINGS || {};
@@ -186,9 +151,7 @@ async function diagnoseTorrentio(tmdbId, mediaType, seasonNum, episodeNum) {
   }
 
   try {
-    const { streams, upstream } = await fetchTorrentioStreams(
-      provider, tmdbId, mediaType, seasonNum, episodeNum, { diagnostics: true }
-    );
+    const { streams, upstream } = await fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum, { diagnostics: true });
     const cachedStreams = await filterCachedTorrentioStreams(streams);
     const cachedByResolution = { '2160p': 0, '1080p': 0, '720p': 0, other: 0 };
     for (const stream of cachedStreams) {
@@ -226,11 +189,11 @@ async function diagnoseTorrentio(tmdbId, mediaType, seasonNum, episodeNum) {
  * individual failures/timeouts, and returns { providerId, providerName,
  * streams }[] for whichever came back with results.
  */
-async function fetchAllStreams(tmdbId, mediaType, seasonNum, episodeNum) {
+async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum) {
   const attempts = loaded.map(async (provider) => {
     try {
       let streams = provider.id === 'torrentio'
-        ? await fetchTorrentioStreams(provider, tmdbId, mediaType, seasonNum, episodeNum)
+        ? await fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum)
         : await withTimeout(
           Promise.resolve(provider.module.getStreams(tmdbId, mediaType, seasonNum, episodeNum)),
           PROVIDER_TIMEOUT_MS,
