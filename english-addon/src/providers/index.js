@@ -32,6 +32,7 @@ const PROVIDERS = [
   { id: 'vidlink', name: 'VidLink', file: 'vidlink.js' },
   { id: 'videasy', name: 'VidEasy', file: 'videasy.js' },
   { id: 'peachify', name: 'Peachify', file: 'peachify.js' },
+  { id: 'streamflix', name: 'StreamFlix', file: 'streamflix.js' },
   { id: 'allwish', name: 'All-Wish', file: 'allwish.js' },
   { id: 'castle', name: 'Castle', file: 'castle.js' },
   { id: 'netmirror', name: 'NetMirror', file: 'netmirror.js' },
