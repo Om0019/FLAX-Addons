@@ -4,6 +4,7 @@ const { findByImdbId } = require('./tmdb');
 const { PROVIDERS, fetchAllStreams, diagnoseTorrentio } = require('./providers');
 const { extractContainer, extractResolution, formatStreamName, formatStreamDescription } = require('./stream-template');
 const { curateStreams, resolutionTier } = require('./curate');
+const { filterPlayableStreams } = require('./stream-probe');
 
 const app = express();
 app.use(cors());
@@ -120,9 +121,13 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       ...torrentioCurated,
       ...curateStreams(entries.filter((entry) => entry.providerId !== 'torrentio'))
     ];
-    const streams = curated.map(({ raw, providerName }) => normalizeStream(raw, providerName));
+    // Do not expose a link simply because its provider returned it. A bounded
+    // byte-range probe verifies the final, curated links (including their
+    // required request headers) before Stremio sees them.
+    const playable = await filterPlayableStreams(curated);
+    const streams = playable.map(({ raw, providerName }) => normalizeStream(raw, providerName));
 
-    console.log(`English addon: ${imdbId} (${type}) -> ${streams.length} stream(s) (${entries.length} before curation) from ${results.filter((r) => r.streams.length > 0).length}/${results.length} providers`);
+    console.log(`English addon: ${imdbId} (${type}) -> ${streams.length} playable stream(s) (${entries.length} before curation) from ${results.filter((r) => r.streams.length > 0).length}/${results.length} providers`);
     res.json({ streams });
   } catch (error) {
     console.error(`English addon: stream lookup failed for ${id}:`, error.message);
