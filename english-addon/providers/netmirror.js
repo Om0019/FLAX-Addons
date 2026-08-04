@@ -41,10 +41,42 @@
 const REQUEST_TIMEOUT_MS = 4000;
 const MAX_EPISODE_PAGES = 50;
 
+// Optional: route every request this file makes through a MediaFlow Proxy
+// instance instead of fetching directly. Netmirror is the one provider here
+// with no caching layer of its own - it calls its NewTV backend fresh on
+// every single lookup (search, post, player, and a checknewtv.php discovery
+// round when the API host isn't already resolved) - which is what makes it
+// the one most exposed to per-IP rate limiting.
+//
+// Configured via env vars only (MEDIAFLOW_URL, MEDIAFLOW_PASSWORD), never
+// checked into source - set them in the deployment's own environment.
+// Everything is off, and behaves exactly as before, when they're unset.
+const MEDIAFLOW_URL = process.env.MEDIAFLOW_URL || null;
+const MEDIAFLOW_PASSWORD = process.env.MEDIAFLOW_PASSWORD || null;
+const MEDIAFLOW_ENABLED = Boolean(MEDIAFLOW_URL && MEDIAFLOW_PASSWORD);
+
+// MediaFlow's /proxy/stream relays whatever URL `d` points to - JSON API
+// responses as readily as media - and applies headers to its own upstream
+// request via h_<name> query params rather than accepting them on the
+// request to MediaFlow itself, since it's the upstream fetch that needs
+// them, not the hop to MediaFlow.
+function mediaflowStreamUrl(targetUrl, headers) {
+  const params = new URLSearchParams({ d: targetUrl, api_password: MEDIAFLOW_PASSWORD });
+  for (const [key, value] of Object.entries(headers || {})) {
+    params.append(`h_${key.toLowerCase()}`, String(value));
+  }
+  return `${MEDIAFLOW_URL.replace(/\/$/, "")}/proxy/stream?${params}`;
+}
+
 function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timeoutId));
+  const target = MEDIAFLOW_ENABLED ? mediaflowStreamUrl(url, options.headers) : url;
+  // When proxied, headers travel as query params above, not as real request
+  // headers - sending them again here would apply them to the hop to
+  // MediaFlow rather than the hop MediaFlow itself makes.
+  const fetchOptions = MEDIAFLOW_ENABLED ? { signal: controller.signal } : { ...options, signal: controller.signal };
+  return fetch(target, fetchOptions).finally(() => clearTimeout(timeoutId));
 }
 
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
