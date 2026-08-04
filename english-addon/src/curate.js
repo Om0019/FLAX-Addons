@@ -1,37 +1,59 @@
 /**
- * Trims the combined stream list down to at most 2 per resolution tier, each
- * from a different provider, so one dead link still leaves a working
- * alternative without burying the list in near-duplicates. Anything below
- * 720p - 480p, 360p, or a stream whose resolution a provider never labeled
- * at all - is only included when none of 720p/1080p/2160p turned up
- * anything; otherwise it's padding, not a fallback.
+ * Trims the combined stream list to at most 5 non-torrentio streams, ranked
+ * by provider reliability first and resolution second. (Torrentio has its
+ * own separate slots, added on top in server.js - this cap doesn't count
+ * them.)
  *
- * Torrentio goes first by design: when it has a cached result for a tier,
- * that's a direct debrid-backed link and gets first pick. When it doesn't
- * (nothing cached, or the debrid check couldn't run - see torbox-cache.js),
- * it simply has no entries in that tier, so pickTopDistinctProviders falls
- * straight through to the next-ranked provider with no special-casing
- * needed - "priority with instant fallback" is just what this ranking does.
+ * Reliability dominates. A provider several ranks down in PROVIDER_PRIORITY
+ * does not get to jump a reliable provider by claiming a higher resolution -
+ * "higher quality" is not evidence the link actually plays, and an unproven
+ * 2160p claim from a shaky source is not a better bet than a proven
+ * provider's 1080p. Resolution only breaks ties between providers the list
+ * doesn't otherwise distinguish.
  *
- * Everything after it follows what was actually observed working:
- * hdhub4u/uhdmovies/4khdhubnew/castle/netmirror consistently returned
- * results in testing; videasy has been deprioritized due to reliability;
- * vidsrc/vidfast/vidlink/allwish did not (in this dev sandbox - that looked
- * network-related rather than a real pattern, so they're kept in rotation
- * rather than dropped, just ranked last).
+ * Quality does one other job: a provider contributes at most one entry, its
+ * single best resolution - not because quality outranks reliability, but
+ * because the rule that lets a reliable, multi-resolution provider through
+ * at all only grants it one slot, not one per resolution it happens to
+ * offer. hdhub4u having 2160p, 1080p and 720p links for the same title is
+ * one strong source, not three of the five slots.
+ *
+ * Torrentio goes first by design, ahead of this list entirely: when it has a
+ * cached result, that's a direct debrid-backed link and gets first pick, as
+ * server.js's own torrentio handling reflects. Reliability here otherwise
+ * reflects what was actually observed working: hdhub4u/uhdmovies/4khdhubnew/
+ * castle consistently returned playable links in testing. netmirror sits
+ * just below them - verified end to end (real HLS ladder, real audio
+ * tracks, working segments) across several titles, but through a single
+ * narrow path (Netflix/Prime/Hotstar/Disney search only, not a general
+ * catalog), so it's trusted less than sources proven across a broader range
+ * of content. streamflix is ranked below that: its links only state a
+ * resolution when the release filename happens to carry one. videasy is
+ * ranked lower still: most of its servers answer 404/500 on any given
+ * title. peachify is last of the working sources; allwish is anime-only and
+ * contributes nothing to anything else, so it costs nothing to leave in
+ * rotation at the end.
+ *
+ * vidlink, vidsrc and vidfast are absent deliberately - see the registry in
+ * src/providers/index.js for what each one does now.
  */
 
 const PROVIDER_PRIORITY = [
-  'torrentio', 'peachify', 'hdhub4u', 'uhdmovies', '4khdhubnew', 'castle', 'netmirror',
-  'videasy', 'vidsrc', 'vidfast', 'vidlink', 'allwish'
+  'torrentio', 'hdhub4u', 'uhdmovies', '4khdhubnew', 'castle', 'netmirror',
+  'streamflix', 'videasy', 'peachify', 'allwish'
 ];
 
-const PER_TIER_LIMIT = 2;
+const MAX_STREAMS = 5;
 const PRIMARY_TIERS = ['2160p', '1080p', '720p'];
 // 480p, 360p, and "no resolution info at all" are all treated as one bucket:
 // each is a worse bet than any primary tier, so there's no reason to rank
 // them against each other, only against whether a primary tier has anything.
 const FALLBACK_TIER = 'fallback';
+// Best first, so a larger index is the more conservative claim. Used both as
+// curateStreams' tiebreak and, in the server's response shaping, to resolve
+// the same link arriving under two different resolution labels; kept beside
+// resolutionTier so the two cannot drift apart.
+const TIER_ORDER = [...PRIMARY_TIERS, FALLBACK_TIER];
 
 function providerRank(providerId) {
   const idx = PROVIDER_PRIORITY.indexOf(providerId);
@@ -46,43 +68,26 @@ function resolutionTier(resolution) {
   return FALLBACK_TIER;
 }
 
-/** Best `limit` entries by provider priority, at most one per provider. */
-function pickTopDistinctProviders(entries, limit) {
-  const sorted = [...entries].sort((a, b) => providerRank(a.providerId) - providerRank(b.providerId));
-  const picked = [];
-  const usedProviders = new Set();
-
-  for (const entry of sorted) {
-    if (usedProviders.has(entry.providerId)) continue;
-    usedProviders.add(entry.providerId);
-    picked.push(entry);
-    if (picked.length >= limit) break;
-  }
-
-  return picked;
+function tierRank(entry) {
+  return TIER_ORDER.indexOf(resolutionTier(entry.resolution));
 }
 
 /**
  * @param {{ providerId: string, resolution: string|null }[]} entries
- * @returns entries to keep, ordered highest resolution first
+ * @returns entries to keep, ordered most reliable provider first
  */
 function curateStreams(entries) {
-  const byTier = new Map([['2160p', []], ['1080p', []], ['720p', []], [FALLBACK_TIER, []]]);
+  const bestPerProvider = new Map();
   for (const entry of entries) {
-    byTier.get(resolutionTier(entry.resolution)).push(entry);
+    const existing = bestPerProvider.get(entry.providerId);
+    if (!existing || tierRank(entry) < tierRank(existing)) {
+      bestPerProvider.set(entry.providerId, entry);
+    }
   }
 
-  const hasPrimaryTierResults = PRIMARY_TIERS.some((tier) => byTier.get(tier).length > 0);
-
-  const selected = [];
-  for (const tier of PRIMARY_TIERS) {
-    selected.push(...pickTopDistinctProviders(byTier.get(tier), PER_TIER_LIMIT));
-  }
-  if (!hasPrimaryTierResults) {
-    selected.push(...pickTopDistinctProviders(byTier.get(FALLBACK_TIER), PER_TIER_LIMIT));
-  }
-
-  return selected;
+  return [...bestPerProvider.values()]
+    .sort((a, b) => providerRank(a.providerId) - providerRank(b.providerId) || tierRank(a) - tierRank(b))
+    .slice(0, MAX_STREAMS);
 }
 
-module.exports = { curateStreams, resolutionTier };
+module.exports = { curateStreams, resolutionTier, TIER_ORDER };
