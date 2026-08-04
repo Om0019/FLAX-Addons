@@ -86,4 +86,25 @@ function curateStreams(entries) {
     .slice(0, MAX_STREAMS);
 }
 
-module.exports = { curateStreams, resolutionTier, TIER_ORDER };
+// Separate from MAX_STREAMS deliberately: Torrentio is one provider
+// surfacing many distinct cached torrents (different releases, different
+// hashes), not many providers each claiming a title. The "one entry per
+// provider" rule in curateStreams doesn't apply here - collapsing Torrentio
+// to a single stream would have been throwing away the other cached
+// releases TorBox already confirmed are instant, for no reason but an
+// arbitrary cap. Ranked by resolution only, since every entry already comes
+// from the one most-trusted source and there is no second provider to break
+// ties against.
+const TORRENTIO_STREAM_LIMIT = 5;
+
+/**
+ * @param {{ resolution: string|null }[]} entries all already known to be Torrentio's
+ * @returns entries to keep, ordered highest resolution first
+ */
+function curateTorrentioStreams(entries) {
+  return [...entries]
+    .sort((a, b) => tierRank(a) - tierRank(b))
+    .slice(0, TORRENTIO_STREAM_LIMIT);
+}
+
+module.exports = { curateStreams, curateTorrentioStreams, resolutionTier, TIER_ORDER };

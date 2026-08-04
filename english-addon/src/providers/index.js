@@ -170,6 +170,33 @@ function isTorrentioCachedLabel(name) {
   return /(?:^|[^A-Z0-9])TB\+(?:$|[^A-Z0-9])/i.test(name || '');
 }
 
+// torrentio.strem.fun sits behind Cloudflare, and this environment has
+// observed it intermittently blocked or slow from here (see ../torbox-cache.js's
+// docblock) — "it shows up if I refresh" is exactly the signature of a
+// transient failure that a second attempt clears. One retry, sharing the
+// same overall deadline rather than starting a fresh one, does automatically
+// inside the original request what a manual refresh was doing by hand.
+//
+// A 200 with zero streams is treated the same as a network failure for retry
+// purposes: it is indistinguishable, from here, between a Cloudflare
+// challenge page that happened to parse as valid (empty) JSON and a title
+// that is genuinely absent from Torrentio's index — except that the genuine
+// case looks the same again on a second attempt, and the challenge usually
+// does not.
+const TORRENTIO_MAX_ATTEMPTS = 2;
+
+async function fetchTorrentioOnce(url, timeoutMs) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { headers: TORRENTIO_HEADERS, signal: controller.signal });
+    const payload = await response.json().catch(() => null);
+    return { httpStatus: response.status, payload };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // The old vendored adapter first did another TMDB lookup and temporarily
 // replaced global.fetch, forcing every cold English lookup through one queue.
 // We already have the IMDb id at the HTTP boundary, so call Torrentio directly:
@@ -192,31 +219,41 @@ async function fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum, {
     : `movie/${imdbId}`;
   const debrid = `${encodeURIComponent(settings.debridProvider)}=${encodeURIComponent(settings.debridKey)}`;
   const url = `https://torrentio.strem.fun/${debrid}/stream/${contentId}.json`;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  const upstream = { httpStatus: null, streamCount: null, cachedLabelCount: null };
 
-  try {
-    const response = await fetch(url, { headers: TORRENTIO_HEADERS, signal: controller.signal });
-    upstream.httpStatus = response.status;
-    const payload = await response.json().catch(() => null);
-    const upstreamStreams = Array.isArray(payload?.streams) ? payload.streams : [];
-    upstream.streamCount = payload ? upstreamStreams.length : null;
-    upstream.cachedLabelCount = upstreamStreams.filter((stream) => isTorrentioCachedLabel(stream.name)).length;
-    const streams = upstreamStreams.slice(0, 15).map((stream) => ({
-      name: stream.name || 'Torrentio',
-      title: stream.title || stream.name || 'Torrentio',
-      url: stream.url,
-      infoHash: stream.infoHash,
-      __torrentioCached: isTorrentioCachedLabel(stream.name)
-    })).filter((stream) => Boolean(stream.url));
-    return diagnostics ? { streams, upstream } : streams;
-  } catch (error) {
-    if (error.name === 'AbortError') throw new Error(`Torrentio timed out after ${timeoutMs}ms`);
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
+  const deadlineAt = Date.now() + timeoutMs;
+  const upstream = { httpStatus: null, streamCount: null, cachedLabelCount: null };
+  let lastError = null;
+
+  for (let attempt = 0; attempt < TORRENTIO_MAX_ATTEMPTS; attempt++) {
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) break;
+
+    try {
+      const { httpStatus, payload } = await fetchTorrentioOnce(url, remaining);
+      upstream.httpStatus = httpStatus;
+      const upstreamStreams = Array.isArray(payload?.streams) ? payload.streams : [];
+      upstream.streamCount = payload ? upstreamStreams.length : null;
+      upstream.cachedLabelCount = upstreamStreams.filter((stream) => isTorrentioCachedLabel(stream.name)).length;
+
+      if (upstreamStreams.length === 0 && attempt < TORRENTIO_MAX_ATTEMPTS - 1) {
+        lastError = new Error('Torrentio returned no streams');
+        continue;
+      }
+
+      const streams = upstreamStreams.slice(0, 15).map((stream) => ({
+        name: stream.name || 'Torrentio',
+        title: stream.title || stream.name || 'Torrentio',
+        url: stream.url,
+        infoHash: stream.infoHash,
+        __torrentioCached: isTorrentioCachedLabel(stream.name)
+      })).filter((stream) => Boolean(stream.url));
+      return diagnostics ? { streams, upstream } : streams;
+    } catch (error) {
+      lastError = error.name === 'AbortError' ? new Error(`Torrentio timed out after ${timeoutMs}ms`) : error;
+    }
   }
+
+  throw lastError || new Error('Torrentio request failed');
 }
 
 /**
@@ -320,11 +357,37 @@ async function diagnoseTorrentio(imdbId, mediaType, seasonNum, episodeNum) {
 }
 
 /**
+ * Torrentio needs only the IMDb id - no TMDB lookup - unlike every other
+ * provider here, which is keyed on tmdbId. Exposed standalone so the caller
+ * can start it the moment a request arrives instead of waiting behind TMDB,
+ * which was pure dead time on Torrentio's own budget: TMDB's own timeout is
+ * up to 3s, and until it resolved, Torrentio's clock had not even started.
+ * Never throws - failures are logged and folded into an empty result, the
+ * same contract fetchAllStreams gives every other provider.
+ */
+async function fetchTorrentioCachedStreams(imdbId, mediaType, seasonNum, episodeNum, { timeoutMs = TORRENTIO_TIMEOUT_MS } = {}) {
+  try {
+    const streams = await filterCachedTorrentioStreams(
+      await fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum, { timeoutMs })
+    );
+    return { providerId: 'torrentio', providerName: 'Torrentio', streams };
+  } catch (error) {
+    console.warn('Provider torrentio failed:', error.message);
+    return { providerId: 'torrentio', providerName: 'Torrentio', streams: [] };
+  }
+}
+
+/**
  * Calls every loaded provider's getStreams in parallel, tolerating
  * individual failures/timeouts, and returns { providerId, providerName,
  * streams }[] for whichever came back with results.
+ *
+ * `includeTorrentio: false` excludes it entirely rather than just leaving it
+ * to fail on a missing tmdbId - the caller is expected to have already
+ * started it via fetchTorrentioCachedStreams and merge that result in
+ * separately, which is what src/server.js does.
  */
-async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum, { timeoutMs } = {}) {
+async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum, { timeoutMs, includeTorrentio = true } = {}) {
   // The caller owns the request budget and tells us what is left of it. Without
   // this the provider deadline was a fixed 8s that knew nothing about the time
   // TMDB had already spent, so a slow lookup pushed the whole response past the
@@ -334,22 +397,21 @@ async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum,
     Math.min(PROVIDER_TIMEOUT_MS, timeoutMs ?? PROVIDER_TIMEOUT_MS)
   );
 
-  const attempts = loaded.map(async (provider) => {
+  const providersToRun = includeTorrentio ? loaded : loaded.filter((provider) => provider.id !== 'torrentio');
+
+  const attempts = providersToRun.map(async (provider) => {
+    if (provider.id === 'torrentio') {
+      return fetchTorrentioCachedStreams(imdbId, mediaType, seasonNum, episodeNum, {
+        timeoutMs: Math.min(TORRENTIO_TIMEOUT_MS, deadline)
+      });
+    }
     try {
-      let streams = provider.id === 'torrentio'
-        ? await fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum, {
-          timeoutMs: Math.min(TORRENTIO_TIMEOUT_MS, deadline)
-        })
-        : await withTimeout(
-          Promise.resolve(provider.module.getStreams(tmdbId, mediaType, seasonNum, episodeNum)),
-          deadline,
-          provider.id
-        );
-      streams = Array.isArray(streams) ? streams : [];
-      if (provider.id === 'torrentio') {
-        streams = await filterCachedTorrentioStreams(streams);
-      }
-      return { providerId: provider.id, providerName: provider.name, streams };
+      const streams = await withTimeout(
+        Promise.resolve(provider.module.getStreams(tmdbId, mediaType, seasonNum, episodeNum)),
+        deadline,
+        provider.id
+      );
+      return { providerId: provider.id, providerName: provider.name, streams: Array.isArray(streams) ? streams : [] };
     } catch (error) {
       console.warn(`Provider ${provider.id} failed:`, error.message);
       return { providerId: provider.id, providerName: provider.name, streams: [] };
@@ -359,4 +421,4 @@ async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum,
   return Promise.all(attempts);
 }
 
-module.exports = { PROVIDERS, fetchAllStreams, diagnoseTorrentio };
+module.exports = { PROVIDERS, fetchAllStreams, fetchTorrentioCachedStreams, diagnoseTorrentio };
