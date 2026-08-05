@@ -57,6 +57,22 @@ function normalizeUrl(url) {
   }
 }
 
+/**
+ * AIOStreams is never probed.
+ *
+ * Its links are debrid resolve endpoints: the URL does not address a file, it
+ * asks the configured debrid service to hand one over, and that handover can
+ * take longer than any probe deadline we can afford. A timed-out probe is
+ * kept anyway, so probing it only spends budget the real file-URL providers'
+ * probes need, to reach the conclusion it started with. If AIOStreams, its
+ * indexer, or the debrid service behind it is actually down, that shows up
+ * as AIOStreams returning nothing or erroring - not as a single resolve link
+ * failing a 2s byte-range check.
+ */
+function isProbeable(entry) {
+  return entry.providerId !== 'aiostreams';
+}
+
 function normalizeStream(raw, providerName) {
   const behaviorHints = { notWebReady: true };
   if (raw.headers && Object.keys(raw.headers).length > 0) {
@@ -81,4 +97,4 @@ function normalizeStream(raw, providerName) {
   };
 }
 
-module.exports = { dedupeByUrl, normalizeUrl, normalizeStream };
+module.exports = { dedupeByUrl, normalizeUrl, isProbeable, normalizeStream };

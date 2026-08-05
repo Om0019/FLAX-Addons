@@ -3,8 +3,8 @@ const cors = require('cors');
 const { findByImdbId } = require('./tmdb');
 const { PROVIDERS, fetchAllStreams, fetchAiostreamsProviderStreams } = require('./providers');
 const { extractResolution } = require('./stream-template');
-const { curateStreams } = require('./curate');
-const { dedupeByUrl, normalizeStream } = require('./response');
+const { curateStreams, curateAiostreamsStreams } = require('./curate');
+const { dedupeByUrl, isProbeable, normalizeStream } = require('./response');
 const { STREAM_PROBE_TIMEOUT_MS, selectPlayableStreams } = require('./stream-probe');
 
 const app = express();
@@ -100,11 +100,19 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       providerStreams.map((raw) => ({ providerId, providerName, raw, resolution: extractResolution(raw) }))
     ));
 
+    // AIOStreams is an additional debrid-backed option, not one of the five
+    // regular-provider slots, and is curated separately from them - see
+    // curateAiostreamsStreams in curate.js for why it isn't collapsed to one
+    // entry the way every other provider is.
+    //
     // Expressed as a function of the still-viable entries rather than computed
     // once, because the probe below re-runs it after dropping dead links. That
-    // is what keeps the cap true of the final response and not merely of the
-    // first guess at it.
-    const curate = (available) => curateStreams(available);
+    // is what keeps both limits true of the final response and not merely of
+    // the first guess at it.
+    const curate = (available) => [
+      ...curateAiostreamsStreams(available.filter((entry) => entry.providerId === 'aiostreams')),
+      ...curateStreams(available.filter((entry) => entry.providerId !== 'aiostreams'))
+    ];
 
     // Do not expose a link simply because its provider returned it. A bounded
     // byte-range probe verifies the curated links (including their required
@@ -115,6 +123,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     const playable = probeBudgetMs >= MIN_PROBE_BUDGET_MS
       ? await selectPlayableStreams(entries, curate, {
         deadlineAt,
+        shouldProbe: isProbeable,
         timeoutMs: Math.min(STREAM_PROBE_TIMEOUT_MS, probeBudgetMs)
       })
       : curate(entries);
