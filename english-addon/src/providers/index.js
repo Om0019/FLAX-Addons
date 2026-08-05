@@ -178,7 +178,13 @@ function isTorrentioCachedLabel(name) {
 // dropped before it can ever be curated, rather than shown and looking
 // broken. Matched against the release name/title text Torrentio returns,
 // same text extractResolution reads its resolution from.
-const HDR_PATTERN = /\bHDR10\+|\bHDR10\b|\bHDR\b|\bDoVi\b|\bDolby[ .]?Vision\b/i;
+//
+// `DV` (bare, no "olby"/"oVi") is the tag scene/P2P release names actually
+// use for Dolby Vision far more often than the spelled-out forms - missing
+// it here meant DV releases sailed straight through. `\b...\b` keeps it
+// from matching inside DVD/DVDRip/DVDScr, where the following letter isn't
+// a boundary.
+const HDR_PATTERN = /\bHDR10\+|\bHDR10\b|\bHDR\b|\bDV\b|\bDoVi\b|\bDolby[ .]?Vision\b|\bHLG\b/i;
 
 function isHdrRelease(stream) {
   const text = `${stream.title || ''} ${stream.name || ''}`;
