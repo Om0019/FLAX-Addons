@@ -1,9 +1,9 @@
 const express = require('express');
 const cors = require('cors');
 const { findByImdbId } = require('./tmdb');
-const { PROVIDERS, fetchAllStreams, fetchTorrentioCachedStreams, diagnoseTorrentio } = require('./providers');
+const { PROVIDERS, fetchAllStreams, fetchAiostreamsProviderStreams } = require('./providers');
 const { extractResolution } = require('./stream-template');
-const { curateStreams, curateTorrentioStreams } = require('./curate');
+const { curateStreams } = require('./curate');
 const { dedupeByUrl, isProbeable, normalizeStream } = require('./response');
 const { STREAM_PROBE_TIMEOUT_MS, selectPlayableStreams } = require('./stream-probe');
 
@@ -11,7 +11,7 @@ const app = express();
 app.use(cors());
 
 // Ceiling on one stream lookup, measured from the moment the request arrives.
-// Torrentio (fetch + TorBox cache check) now runs from the very start,
+// AIOStreams (fetched directly by IMDb id) now runs from the very start,
 // parallel with TMDB and the other providers, rather than serialized after
 // TMDB resolves - so it draws on this same clock rather than adding its own
 // on top. The probe phase draws on what's left of this rather than starting
@@ -30,7 +30,7 @@ const MANIFEST = {
   id: 'org.stremio.english-addon',
   version: '1.0.0',
   name: 'English',
-  description: `English-language movies and TV, aggregated from: ${PROVIDERS.map((p) => p.name).join(', ')}`,
+  description: `English-language movies and TV, aggregated from: AIOStreams, ${PROVIDERS.map((p) => p.name).join(', ')}`,
   resources: ['stream'],
   types: ['movie', 'series'],
   idPrefixes: ['tt'],
@@ -60,32 +60,6 @@ function parseStreamRequest(type, id) {
   return { imdbId, season, episode };
 }
 
-// This route is deliberately not advertised in the manifest. It returns only
-// aggregate diagnostics: never source URLs, hashes, or debrid credentials.
-app.get('/diagnostics/torrentio/:type/:id.json', async (req, res) => {
-  const parsed = parseStreamRequest(req.params.type, req.params.id);
-  if (parsed.error) return res.status(400).json({ err: parsed.error });
-
-  try {
-    const tmdb = await findByImdbId(parsed.imdbId, req.params.type);
-    if (!tmdb) return res.status(404).json({ err: 'TMDB match not found' });
-
-    const mediaType = req.params.type === 'series' ? 'tv' : 'movie';
-    const torrentio = await diagnoseTorrentio(parsed.imdbId, mediaType, parsed.season, parsed.episode);
-    return res.json({
-      imdbId: parsed.imdbId,
-      tmdbId: tmdb.id,
-      mediaType,
-      season: parsed.season,
-      episode: parsed.episode,
-      torrentio
-    });
-  } catch (error) {
-    console.error(`English addon: Torrentio diagnostics failed for ${req.params.id}:`, error.message);
-    return res.status(500).json({ err: 'Internal error' });
-  }
-});
-
 app.get('/stream/:type/:id.json', async (req, res) => {
   const { type } = req.params;
   const id = req.params.id;
@@ -96,14 +70,14 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   const deadlineAt = Date.now() + REQUEST_BUDGET_MS;
   const mediaType = type === 'series' ? 'tv' : 'movie';
 
-  // Torrentio is keyed on the IMDb id alone, unlike every other provider here,
+  // AIOStreams is keyed on the IMDb id alone, unlike every other provider here,
   // which needs the TMDB id below. Starting it now, rather than after the TMDB
   // lookup resolves, hands it the full request budget instead of whatever was
-  // left over — TMDB's own timeout is up to 3s, and that used to be dead time
-  // on Torrentio's clock before it had even sent a request. Never rejects, so
-  // there is nothing to catch here; a TMDB miss below simply leaves this
+  // left over — TMDB's own timeout is up to 3s, and that would otherwise be dead
+  // time on AIOStreams' clock before it had even sent a request. Never rejects,
+  // so there is nothing to catch here; a TMDB miss below simply leaves this
   // promise unawaited, which is harmless since it settles on its own.
-  const torrentioPromise = fetchTorrentioCachedStreams(imdbId, mediaType, season, episode, {
+  const aiostreamsPromise = fetchAiostreamsProviderStreams(imdbId, mediaType, season, episode, {
     timeoutMs: deadlineAt - Date.now() - PROBE_RESERVE_MS
   });
 
@@ -114,30 +88,31 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       return res.json({ streams: [] });
     }
 
-    const [torrentioResult, otherResults] = await Promise.all([
-      torrentioPromise,
+    const [aiostreamsResult, otherResults] = await Promise.all([
+      aiostreamsPromise,
       fetchAllStreams(tmdb.id, imdbId, mediaType, season, episode, {
-        timeoutMs: deadlineAt - Date.now() - PROBE_RESERVE_MS,
-        includeTorrentio: false
+        timeoutMs: deadlineAt - Date.now() - PROBE_RESERVE_MS
       })
     ]);
-    const results = [torrentioResult, ...otherResults];
+    const results = [aiostreamsResult, ...otherResults];
 
     const entries = dedupeByUrl(results.flatMap(({ providerId, providerName, streams: providerStreams }) =>
       providerStreams.map((raw) => ({ providerId, providerName, raw, resolution: extractResolution(raw) }))
     ));
-    // Torrentio is an additional cached-debrid option, not one of the five
-    // regular-provider slots, and is curated separately from them - see
-    // curateTorrentioStreams in curate.js for why it isn't collapsed to one
-    // entry the way every other provider is.
+
+    // AIOStreams is an additional debrid-backed option, not one of the five
+    // regular-provider slots: every result it returns is kept, uncapped and
+    // uncollapsed, since its own instance already decides what's worth
+    // returning (see src/providers/aiostreams.js). Only the other providers
+    // go through curateStreams' 5-slot, one-entry-per-provider cap.
     //
     // Expressed as a function of the still-viable entries rather than computed
     // once, because the probe below re-runs it after dropping dead links. That
-    // is what keeps both limits true of the final response and not merely of
-    // the first guess at it.
+    // is what keeps the cap true of the final response and not merely of the
+    // first guess at it.
     const curate = (available) => [
-      ...curateTorrentioStreams(available.filter((entry) => entry.providerId === 'torrentio')),
-      ...curateStreams(available.filter((entry) => entry.providerId !== 'torrentio'))
+      ...available.filter((entry) => entry.providerId === 'aiostreams'),
+      ...curateStreams(available.filter((entry) => entry.providerId !== 'aiostreams'))
     ];
 
     // Do not expose a link simply because its provider returned it. A bounded

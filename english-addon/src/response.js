@@ -58,23 +58,19 @@ function normalizeUrl(url) {
 }
 
 /**
- * Torrentio is never probed.
+ * AIOStreams is never probed.
  *
  * Its links are debrid resolve endpoints: the URL does not address a file, it
- * asks TorBox to hand one over, and that handover takes longer than any probe
- * deadline we can afford. Every one of them timed out, and a timed-out probe is
- * kept anyway - so the probe was spending its entire 2s budget, on the two
- * highest-ranked streams in the response, to reach the conclusion it started
- * with. Worse, that 2s came out of the same budget the probes of real file URLs
- * draw on, which is how genuinely dead links from other providers ended up
- * going out unverified.
- *
- * Nothing is lost by skipping it: these streams are only offered at all once
- * TorBox has confirmed the torrent is cached (see filterCachedTorrentioStreams),
- * which is a stronger guarantee than a byte-range probe gives.
+ * asks the configured debrid service to hand one over, and that handover can
+ * take longer than any probe deadline we can afford. A timed-out probe is
+ * kept anyway, so probing it only spends budget the real file-URL providers'
+ * probes need, to reach the conclusion it started with. If AIOStreams, its
+ * indexer, or the debrid service behind it is actually down, that shows up
+ * as AIOStreams returning nothing or erroring - not as a single resolve link
+ * failing a 2s byte-range check.
  */
 function isProbeable(entry) {
-  return entry.providerId !== 'torrentio';
+  return entry.providerId !== 'aiostreams';
 }
 
 function normalizeStream(raw, providerName) {

@@ -143,11 +143,11 @@ test('each link is probed at most once across rounds', async () => {
   }
 });
 
-// Torrentio's links are debrid resolve endpoints, not files: they take longer
+// AIOStreams' links are debrid resolve endpoints, not files: they take longer
 // to answer than any probe deadline we can afford, and a timed-out probe is
 // kept anyway. Probing them spent the whole budget to learn nothing, and the
 // budget it spent was the one the other providers' links needed.
-test('torrentio is never fetched and is kept regardless', async () => {
+test('aiostreams is never fetched and is kept regardless', async () => {
   const probed = [];
   const countingServer = http.createServer((req, res) => {
     probed.push(req.url);
@@ -164,17 +164,17 @@ test('torrentio is never fetched and is kept regardless', async () => {
       resolution: '1080p',
       raw: { url: `${base}${path}` }
     });
-    const entries = [at('torrentio', '/resolve'), at('castle', '/dead')];
+    const entries = [at('aiostreams', '/resolve'), at('castle', '/dead')];
 
     const playable = await selectPlayableStreams(entries, curate, {
       deadlineAt: Date.now() + 8000,
-      shouldProbe: (item) => item.providerId !== 'torrentio'
+      shouldProbe: (item) => item.providerId !== 'aiostreams'
     });
 
     assert.deepEqual(probed, ['/dead'], 'only the probeable link was fetched');
-    // Castle's link answered like a dead one and went; Torrentio's stands even
+    // Castle's link answered like a dead one and went; AIOStreams' stands even
     // though the same server would have failed it.
-    assert.deepEqual(playable.map((item) => item.providerId), ['torrentio']);
+    assert.deepEqual(playable.map((item) => item.providerId), ['aiostreams']);
   } finally {
     await new Promise((resolve) => countingServer.close(resolve));
   }

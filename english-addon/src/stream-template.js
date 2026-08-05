@@ -6,10 +6,9 @@
  *   Name:        {cached ? "⚡️ " : ""}{indexer}
  *   Description: English{container ? " • " + container : ""}{resolution ? " • " + resolution : ""}
  *
- * `indexer` is the provider's own label (e.g. "VidSrc", "Torrentio") - these
- * vendored files don't expose a finer per-tracker field (Torrentio's actual
- * indexer, e.g. "YTS") separately from its free-text title, so this doesn't
- * try to parse it out.
+ * `indexer` is the provider's own label (e.g. "VidSrc", "AIOStreams") - these
+ * vendored files don't expose a finer per-tracker field separately from
+ * their free-text title, so this doesn't try to parse it out.
  */
 
 const CONTAINER_PATTERN = /\.(mp4|mkv|m3u8|avi|mov|webm)(?:$|[?#])/i;

@@ -119,7 +119,7 @@ async function filterPlayableStreams(entries, options = {}) {
  * tiers, so a dead 2160p pair pulled its replacements from the 1080p leftovers
  * and handed back four 1080p streams. Re-running `curate` over the survivors
  * re-establishes every one of those rules by construction, including any the
- * caller composes on top (Torrentio's one-per-tier slot), rather than
+ * caller composes on top (AIOStreams' one-per-tier slot), rather than
  * re-implementing them here where they would drift.
  *
  * Verdicts are remembered by URL, so each link is probed at most once no matter
