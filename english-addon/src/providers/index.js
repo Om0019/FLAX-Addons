@@ -170,6 +170,21 @@ function isTorrentioCachedLabel(name) {
   return /(?:^|[^A-Z0-9])TB\+(?:$|[^A-Z0-9])/i.test(name || '');
 }
 
+// HDR content played back on a non-HDR-capable screen or player renders
+// washed-out and too dark rather than the intended punchier contrast - the
+// display has no idea what to do with the wider range, so it just clips it.
+// There is no way to know from here whether a given viewer's setup can
+// handle it, so any release that advertises itself as HDR (any variety) is
+// dropped before it can ever be curated, rather than shown and looking
+// broken. Matched against the release name/title text Torrentio returns,
+// same text extractResolution reads its resolution from.
+const HDR_PATTERN = /\bHDR10\+|\bHDR10\b|\bHDR\b|\bDoVi\b|\bDolby[ .]?Vision\b/i;
+
+function isHdrRelease(stream) {
+  const text = `${stream.title || ''} ${stream.name || ''}`;
+  return HDR_PATTERN.test(text);
+}
+
 // torrentio.strem.fun sits behind Cloudflare, and this environment has
 // observed it intermittently blocked or slow from here (see ../torbox-cache.js's
 // docblock) — "it shows up if I refresh" is exactly the signature of a
@@ -240,13 +255,16 @@ async function fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum, {
         continue;
       }
 
-      const streams = upstreamStreams.slice(0, 15).map((stream) => ({
-        name: stream.name || 'Torrentio',
-        title: stream.title || stream.name || 'Torrentio',
-        url: stream.url,
-        infoHash: stream.infoHash,
-        __torrentioCached: isTorrentioCachedLabel(stream.name)
-      })).filter((stream) => Boolean(stream.url));
+      const streams = upstreamStreams
+        .filter((stream) => !isHdrRelease(stream))
+        .slice(0, 15)
+        .map((stream) => ({
+          name: stream.name || 'Torrentio',
+          title: stream.title || stream.name || 'Torrentio',
+          url: stream.url,
+          infoHash: stream.infoHash,
+          __torrentioCached: isTorrentioCachedLabel(stream.name)
+        })).filter((stream) => Boolean(stream.url));
       return diagnostics ? { streams, upstream } : streams;
     } catch (error) {
       lastError = error.name === 'AbortError' ? new Error(`Torrentio timed out after ${timeoutMs}ms`) : error;
@@ -421,4 +439,4 @@ async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum,
   return Promise.all(attempts);
 }
 
-module.exports = { PROVIDERS, fetchAllStreams, fetchTorrentioCachedStreams, diagnoseTorrentio };
+module.exports = { PROVIDERS, fetchAllStreams, fetchTorrentioCachedStreams, diagnoseTorrentio, isHdrRelease };
