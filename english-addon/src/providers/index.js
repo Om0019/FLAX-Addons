@@ -102,24 +102,54 @@ function loadPatchedProvider(entry, file) {
     // Fight Club returned zero), but gate it on token coverage — accept the
     // first result only when it actually covers the query's significant title
     // tokens. Coverage survives release cruft where Jaccard does not.
-    const coverageHelper = `function __englishHdhubCovers(candidate, target) {
-      const tokens = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ').filter((token) => token.length > 1 && !['a', 'an', 'and', 'for', 'in', 'of', 'the', 'to'].includes(token));
-      const wanted = [...new Set(tokens(target))];
+    //
+    // For a TV request specifically, coverage alone isn't enough: every
+    // season of a show shares the same "Breaking Bad" tokens, so a plain
+    // `results[0]` fallback picks whichever season the search API ranked
+    // first (observed: always the newest season) regardless of which one
+    // was asked for. findBestTitleMatch's own season +0.5/-0.8 adjustment
+    // can't rescue this either - these page titles carry 15-20 release-tag
+    // tokens ("BluRay", "Hindi", "DD2.0", "x264", "10Bit-HEVC"...) a 2-word
+    // TMDB title shares almost none of, so the base Jaccard score is deeply
+    // negative and every candidate lands under the scorer's own 0.3 floor no
+    // matter its season. So the TV fallback requires an explicit,
+    // non-conflicting season marker in the title before accepting a page,
+    // instead of defaulting to whichever one sorted first.
+    const coverageHelper = `function __englishHdhubTokens(value) {
+      return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ').filter((token) => token.length > 1 && !['a', 'an', 'and', 'for', 'in', 'of', 'the', 'to'].includes(token));
+    }
+    function __englishHdhubCovers(candidate, target) {
+      const wanted = [...new Set(__englishHdhubTokens(target))];
       if (wanted.length === 0) return false;
-      const found = new Set(tokens(candidate));
+      const found = new Set(__englishHdhubTokens(candidate));
       return wanted.filter((token) => found.has(token)).length >= Math.ceil(wanted.length * 0.75);
+    }
+    function __englishHdhubSelectFallback(results, target, mediaType, season) {
+      if (mediaType === 'tv' && season) {
+        const seasonStr = String(season);
+        const seasonPatterns = ['season ' + seasonStr, 's' + seasonStr, 'season ' + seasonStr.padStart(2, '0'), 's' + seasonStr.padStart(2, '0')];
+        return results.find((result) => {
+          const lower = String(result.title || '').toLowerCase();
+          const matchesPattern = seasonPatterns.some((pattern) => lower.includes(pattern));
+          const seasonMatch = lower.match(/season\\s*(\\d+)|s(\\d+)/i);
+          const noConflict = !seasonMatch || parseInt(seasonMatch[1] || seasonMatch[2], 10) === season;
+          return matchesPattern && noConflict && __englishHdhubCovers(result.title, target);
+        }) || null;
+      }
+      return results[0] && __englishHdhubCovers(results[0].title, target) ? results[0] : null;
     }\n`;
     source = source.replace('function calculateTitleSimilarity', `${coverageHelper}function calculateTitleSimilarity`);
     // _0x2fa81d is the query object (.title/.year); _0x424e15 the search
-    // results; _0x250433 the scorer's pick (usually null here).
+    // results; _0x250433 the scorer's pick (usually null here); _0x44e130
+    // the requested mediaType; _0xe589e2 the requested season.
     source = source.replace(
       '_0x8b1a29=_0x250433||_0x424e15[0x0]',
-      "_0x8b1a29=_0x250433||(_0x424e15[0x0]&&__englishHdhubCovers(_0x424e15[0x0]['title'],_0x2fa81d['title'])?_0x424e15[0x0]:null)"
+      "_0x8b1a29=_0x250433||__englishHdhubSelectFallback(_0x424e15,_0x2fa81d['title'],_0x44e130,_0xe589e2)"
     );
     // A failed selector must not silently become the first search result.
     source = source.replace(
-      '_0x8b1a29=_0x250433||(_0x424e15[0x0]&&__englishHdhubCovers(_0x424e15[0x0][\'title\'],_0x2fa81d[\'title\'])?_0x424e15[0x0]:null);console',
-      '_0x8b1a29=_0x250433||(_0x424e15[0x0]&&__englishHdhubCovers(_0x424e15[0x0][\'title\'],_0x2fa81d[\'title\'])?_0x424e15[0x0]:null);if(!_0x8b1a29)return[];console'
+      "_0x8b1a29=_0x250433||__englishHdhubSelectFallback(_0x424e15,_0x2fa81d['title'],_0x44e130,_0xe589e2);console",
+      "_0x8b1a29=_0x250433||__englishHdhubSelectFallback(_0x424e15,_0x2fa81d['title'],_0x44e130,_0xe589e2);if(!_0x8b1a29)return[];console"
     );
   }
 
