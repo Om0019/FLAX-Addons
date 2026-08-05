@@ -118,8 +118,7 @@ async function filterPlayableStreams(entries, options = {}) {
  * — hold only at the moment curation runs. A flat reserve is ordered across
  * tiers, so a dead 2160p pair pulled its replacements from the 1080p leftovers
  * and handed back four 1080p streams. Re-running `curate` over the survivors
- * re-establishes every one of those rules by construction, including any the
- * caller composes on top (Torrentio's one-per-tier slot), rather than
+ * re-establishes every one of those rules by construction, rather than
  * re-implementing them here where they would drift.
  *
  * Verdicts are remembered by URL, so each link is probed at most once no matter

@@ -21,8 +21,8 @@ each one and calls that function.
 
 ## Providers included
 
-VidEasy, Peachify, StreamFlix, All-Wish, Castle, 4KHDHub-NEW, HDHub4u,
-UHDMovies, Torrentio.
+AIOStreams, VidEasy, Peachify, StreamFlix, All-Wish, Castle, 4KHDHub-NEW,
+HDHub4u, UHDMovies.
 
 VidSrc, VidFast, VidLink, and NetMirror were tried and dropped — see the
 comments above `PROVIDERS` in `src/providers/index.js` for why each one was
@@ -33,19 +33,22 @@ the others) that pulls in `sqlite`, `worker_threads`, `http2` — a different
 shape of thing than the rest. In testing it took ~16s per call and returned
 zero results.
 
-**Torrentio** needs a debrid provider API key to return anything (it's a
-torrent-indexer front end; without a debrid account there's nothing to hand
-back as a direct stream). `providers/torrentio.js` reads its config from
-`global.SCRAPER_SETTINGS` at call time — the same mechanism Nuvio's own
-settings UI uses to feed providers their per-user config — which
-`src/torrentio-settings.js` sets from `TORRENTIO_DEBRID_PROVIDER` /
-`TORRENTIO_DEBRID_KEY` env vars (defaulting to a TorBox key configured
-directly; see that file). In this dev sandbox, requests to
-`torrentio.strem.fun` came back `403` from Cloudflare regardless of the key —
-looked like the sandbox's outbound IP being blocked, not a config problem
-(the request itself was confirmed correctly formed: key included, right
-path). Worth re-testing once this is deployed somewhere with a normal
-residential/hosting IP.
+**AIOStreams** replaced Torrentio as the debrid-backed source. It's fetched
+directly by IMDb id (`src/providers/aiostreams.js`) against a self-hosted
+AIOStreams instance's search API:
+
+```
+GET {AIOSTREAMS_BASE_URL}?type=movie|series&id=<imdbId[:season:episode]>
+Authorization: Basic base64(uuid:password)
+```
+
+Configured via `AIOSTREAMS_BASE_URL` / `AIOSTREAMS_UUID` /
+`AIOSTREAMS_PASSWORD` env vars (each has a working default baked into
+`aiostreams.js`; override for a different instance or account). Unlike the
+old Torrentio integration, there's no HDR filtering, debrid-cache gating, or
+retry logic layered on top here — the AIOStreams instance is expected to do
+its own filtering, and results are curated/probed the same as every other
+provider.
 
 Verified end-to-end against the running server (`tt0137523` / Fight Club):
 35 streams back from 6 of 11 providers in ~5.8s. A series lookup

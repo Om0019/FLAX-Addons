@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { curateStreams, curateTorrentioStreams, resolutionTier } = require('../src/curate');
+const { curateStreams, resolutionTier } = require('../src/curate');
 
 const entry = (providerId, resolution) => ({ providerId, providerName: providerId, resolution });
 
@@ -42,7 +42,7 @@ test('resolution only breaks ties between providers of otherwise-equal rank', ()
   assert.deepEqual(selected.map((item) => item.providerId), ['unranked-b', 'unranked-a']);
 });
 
-test('at most 5 non-torrentio streams survive, most reliable provider first', () => {
+test('at most 5 streams survive, most reliable provider first', () => {
   const entries = [
     entry('hdhub4u', '2160p'),
     entry('uhdmovies', '2160p'),
@@ -78,41 +78,4 @@ test('resolutionTier treats an unlabeled resolution the same as a below-720p one
   assert.equal(resolutionTier(null), resolutionTier('480p'));
   assert.equal(resolutionTier(undefined), 'fallback');
   assert.equal(resolutionTier('Auto'), 'fallback');
-});
-
-// Regression: TorBox routinely confirms more than one cached release for the
-// same title (fifteen 2160p torrents was the observed count for a real
-// title), and keeping several of them regardless of tier meant every
-// visible slot claimed the same resolution - the other tiers TorBox had
-// also confirmed instant never got a slot at all.
-test('torrentio keeps at most one entry per resolution tier, not several of the same one', () => {
-  const entries = Array.from({ length: 7 }, () => entry('torrentio', '2160p'));
-
-  const selected = curateTorrentioStreams(entries);
-
-  assert.equal(selected.length, 1, 'duplicates in the same tier do not crowd out other tiers');
-  assert.equal(selected[0].resolution, '2160p');
-});
-
-test('torrentio entries are ranked by resolution only, best first, one per tier', () => {
-  const entries = [entry('torrentio', '1080p'), entry('torrentio', '2160p'), entry('torrentio', null)];
-
-  const selected = curateTorrentioStreams(entries);
-
-  assert.deepEqual(selected.map((item) => item.resolution), ['2160p', '1080p', null]);
-});
-
-test('torrentio surfaces up to one entry per tier: 2160p, 1080p, 720p, and unknown', () => {
-  const entries = [
-    entry('torrentio', '2160p'),
-    entry('torrentio', '2160p'),
-    entry('torrentio', '1080p'),
-    entry('torrentio', '720p'),
-    entry('torrentio', 'Auto'),
-    entry('torrentio', null)
-  ];
-
-  const selected = curateTorrentioStreams(entries);
-
-  assert.deepEqual(selected.map((item) => item.resolution), ['2160p', '1080p', '720p', 'Auto']);
 });

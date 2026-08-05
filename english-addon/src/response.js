@@ -57,26 +57,6 @@ function normalizeUrl(url) {
   }
 }
 
-/**
- * Torrentio is never probed.
- *
- * Its links are debrid resolve endpoints: the URL does not address a file, it
- * asks TorBox to hand one over, and that handover takes longer than any probe
- * deadline we can afford. Every one of them timed out, and a timed-out probe is
- * kept anyway - so the probe was spending its entire 2s budget, on the two
- * highest-ranked streams in the response, to reach the conclusion it started
- * with. Worse, that 2s came out of the same budget the probes of real file URLs
- * draw on, which is how genuinely dead links from other providers ended up
- * going out unverified.
- *
- * Nothing is lost by skipping it: these streams are only offered at all once
- * TorBox has confirmed the torrent is cached (see filterCachedTorrentioStreams),
- * which is a stronger guarantee than a byte-range probe gives.
- */
-function isProbeable(entry) {
-  return entry.providerId !== 'torrentio';
-}
-
 function normalizeStream(raw, providerName) {
   const behaviorHints = { notWebReady: true };
   if (raw.headers && Object.keys(raw.headers).length > 0) {
@@ -101,4 +81,4 @@ function normalizeStream(raw, providerName) {
   };
 }
 
-module.exports = { dedupeByUrl, normalizeUrl, isProbeable, normalizeStream };
+module.exports = { dedupeByUrl, normalizeUrl, normalizeStream };

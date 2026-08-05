@@ -1,7 +1,9 @@
 /**
- * Registry over the vendored Nuvio providers in ../../providers/.
+ * Registry over the vendored Nuvio providers in ../../providers/, plus
+ * AIOStreams (src/providers/aiostreams.js), which is fetched directly by
+ * IMDb id rather than loaded as a vendored file.
  *
- * Those files are unmodified local-scraper plugins from the All-in-One-Nuvio
+ * The vendored files are unmodified local-scraper plugins from the All-in-One-Nuvio
  * repo (https://github.com/D3adlyRocket/All-in-One-Nuvio) — obfuscated, but
  * still plain CommonJS modules exporting `getStreams(tmdbId, mediaType,
  * seasonNum, episodeNum)`. Nuvio's own sandbox is what's restricted (no
@@ -12,20 +14,13 @@
 const path = require('path');
 const fs = require('fs');
 const Module = require('module');
-const { configureTorrentioSettings } = require('../torrentio-settings');
-const { checkTorboxCached } = require('../torbox-cache');
-
-configureTorrentioSettings();
+const { fetchAiostreamsStreams } = require('./aiostreams');
 
 const PROVIDER_TIMEOUT_MS = 8000;
-const TORRENTIO_TIMEOUT_MS = 6000;
+const AIOSTREAMS_TIMEOUT_MS = 6000;
 // Never wait so briefly that a healthy provider cannot finish; below this the
 // caller is better served by whatever has already arrived.
 const MIN_PROVIDER_TIMEOUT_MS = 1500;
-const TORRENTIO_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Stremio English Addon)',
-  Accept: 'application/json'
-};
 
 // vixsrc.js was deliberately left out: a 1.1MB bundle pulling in sqlite/
 // worker_threads/http2, ~16s per call in testing, and returned nothing.
@@ -51,6 +46,9 @@ const TORRENTIO_HEADERS = {
 //
 // netmirror was dropped: providers/netmirror.js and its docblock above are
 // history now, not a currently-loaded provider.
+//
+// torrentio was replaced by AIOStreams (see aiostreams.js): fetched directly
+// below by IMDb id, not loaded from providers/*.js.
 const PROVIDERS = [
   { id: 'videasy', name: 'VidEasy', file: 'videasy.js' },
   { id: 'peachify', name: 'Peachify', file: 'peachify.js' },
@@ -59,8 +57,7 @@ const PROVIDERS = [
   { id: 'castle', name: 'Castle', file: 'castle.js' },
   { id: '4khdhubnew', name: '4KHDHub', file: '4khdhubnew.js' },
   { id: 'hdhub4u', name: 'HDHub4u', file: 'hdhub4u.js' },
-  { id: 'uhdmovies', name: 'UHDMovies', file: 'uhdmovies.js' },
-  { id: 'torrentio', name: 'Torrentio', file: 'torrentio.js' }
+  { id: 'uhdmovies', name: 'UHDMovies', file: 'uhdmovies.js' }
 ];
 
 const PATCHED_PROVIDERS = ['hdhub4u', 'castle', 'peachify'];
@@ -166,120 +163,6 @@ const loaded = PROVIDERS.map((entry) => {
   }
 }).filter(Boolean);
 
-function isTorrentioCachedLabel(name) {
-  return /(?:^|[^A-Z0-9])TB\+(?:$|[^A-Z0-9])/i.test(name || '');
-}
-
-// HDR content played back on a non-HDR-capable screen or player renders
-// washed-out and too dark rather than the intended punchier contrast - the
-// display has no idea what to do with the wider range, so it just clips it.
-// There is no way to know from here whether a given viewer's setup can
-// handle it, so any release that advertises itself as HDR (any variety) is
-// dropped before it can ever be curated, rather than shown and looking
-// broken. Matched against the release name/title text Torrentio returns,
-// same text extractResolution reads its resolution from.
-//
-// `DV` (bare, no "olby"/"oVi") is the tag scene/P2P release names actually
-// use for Dolby Vision far more often than the spelled-out forms - missing
-// it here meant DV releases sailed straight through. `\b...\b` keeps it
-// from matching inside DVD/DVDRip/DVDScr, where the following letter isn't
-// a boundary.
-const HDR_PATTERN = /\bHDR10\+|\bHDR10\b|\bHDR\b|\bDV\b|\bDoVi\b|\bDolby[ .]?Vision\b|\bHLG\b/i;
-
-function isHdrRelease(stream) {
-  const text = `${stream.title || ''} ${stream.name || ''}`;
-  return HDR_PATTERN.test(text);
-}
-
-// torrentio.strem.fun sits behind Cloudflare, and this environment has
-// observed it intermittently blocked or slow from here (see ../torbox-cache.js's
-// docblock) — "it shows up if I refresh" is exactly the signature of a
-// transient failure that a second attempt clears. One retry, sharing the
-// same overall deadline rather than starting a fresh one, does automatically
-// inside the original request what a manual refresh was doing by hand.
-//
-// A 200 with zero streams is treated the same as a network failure for retry
-// purposes: it is indistinguishable, from here, between a Cloudflare
-// challenge page that happened to parse as valid (empty) JSON and a title
-// that is genuinely absent from Torrentio's index — except that the genuine
-// case looks the same again on a second attempt, and the challenge usually
-// does not.
-const TORRENTIO_MAX_ATTEMPTS = 2;
-
-async function fetchTorrentioOnce(url, timeoutMs) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, { headers: TORRENTIO_HEADERS, signal: controller.signal });
-    const payload = await response.json().catch(() => null);
-    return { httpStatus: response.status, payload };
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-// The old vendored adapter first did another TMDB lookup and temporarily
-// replaced global.fetch, forcing every cold English lookup through one queue.
-// We already have the IMDb id at the HTTP boundary, so call Torrentio directly:
-// one request, no global state, no queue, and a real abortable deadline.
-async function fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum, { diagnostics = false, timeoutMs = TORRENTIO_TIMEOUT_MS } = {}) {
-  const settings = global.SCRAPER_SETTINGS || {};
-  if (!settings.debridProvider || !settings.debridKey) {
-    throw new Error('Torrentio debrid settings are unavailable');
-  }
-  // Checked before the request, not after it. filterCachedTorrentioStreams drops
-  // everything when the provider is not TorBox — that is the only cache check
-  // wired up — so on any other provider this spent a full round trip, up to the
-  // 6s deadline, to produce a list it was always going to discard.
-  if (settings.debridProvider !== 'torbox') {
-    throw new Error(`Torrentio cache status cannot be verified for debrid provider "${settings.debridProvider}"`);
-  }
-
-  const contentId = mediaType === 'tv'
-    ? `series/${imdbId}:${seasonNum}:${episodeNum}`
-    : `movie/${imdbId}`;
-  const debrid = `${encodeURIComponent(settings.debridProvider)}=${encodeURIComponent(settings.debridKey)}`;
-  const url = `https://torrentio.strem.fun/${debrid}/stream/${contentId}.json`;
-
-  const deadlineAt = Date.now() + timeoutMs;
-  const upstream = { httpStatus: null, streamCount: null, cachedLabelCount: null };
-  let lastError = null;
-
-  for (let attempt = 0; attempt < TORRENTIO_MAX_ATTEMPTS; attempt++) {
-    const remaining = deadlineAt - Date.now();
-    if (remaining <= 0) break;
-
-    try {
-      const { httpStatus, payload } = await fetchTorrentioOnce(url, remaining);
-      upstream.httpStatus = httpStatus;
-      const upstreamStreams = Array.isArray(payload?.streams) ? payload.streams : [];
-      upstream.streamCount = payload ? upstreamStreams.length : null;
-      upstream.cachedLabelCount = upstreamStreams.filter((stream) => isTorrentioCachedLabel(stream.name)).length;
-
-      if (upstreamStreams.length === 0 && attempt < TORRENTIO_MAX_ATTEMPTS - 1) {
-        lastError = new Error('Torrentio returned no streams');
-        continue;
-      }
-
-      const streams = upstreamStreams
-        .filter((stream) => !isHdrRelease(stream))
-        .slice(0, 15)
-        .map((stream) => ({
-          name: stream.name || 'Torrentio',
-          title: stream.title || stream.name || 'Torrentio',
-          url: stream.url,
-          infoHash: stream.infoHash,
-          __torrentioCached: isTorrentioCachedLabel(stream.name)
-        })).filter((stream) => Boolean(stream.url));
-      return diagnostics ? { streams, upstream } : streams;
-    } catch (error) {
-      lastError = error.name === 'AbortError' ? new Error(`Torrentio timed out after ${timeoutMs}ms`) : error;
-    }
-  }
-
-  throw lastError || new Error('Torrentio request failed');
-}
-
 /**
  * Bounds how long the caller waits. The vendored providers take no abort signal,
  * so the work itself cannot be cancelled — but the timer must still be cleared,
@@ -298,106 +181,25 @@ function withTimeout(promise, ms, label) {
 }
 
 /**
- * A torrent that isn't cached on the configured debrid service means
- * playback would have to wait for it to download first, so uncached results
- * are dropped rather than shown - this is the only provider here where that
- * concept applies, since every other source hands back a direct link that
- * either plays or doesn't. Only TorBox is wired up for the cache check right
- * now (see ../torbox-cache.js): if a different debrid provider is
- * configured, or the check itself fails, everything is dropped rather than
- * risk showing something unplayable. Torrentio labels instant TorBox cache
- * hits `TB+`; plain `TB` entries would first need TorBox to download them.
- * The marker is captured before the vendored adapter reformats the response.
- */
-async function filterCachedTorrentioStreams(streams) {
-  const settings = global.SCRAPER_SETTINGS || {};
-  if (settings.debridProvider !== 'torbox' || !settings.debridKey) {
-    console.warn('Torrentio: no TorBox key configured; cannot verify cache status, dropping all results.');
-    return [];
-  }
-
-  const hashes = streams.map((stream) => stream.infoHash).filter(Boolean);
-  const cachedHashes = await checkTorboxCached(hashes, settings.debridKey);
-  return streams
-    .filter((stream) => (
-      (stream.infoHash && cachedHashes.has(stream.infoHash.toLowerCase())) ||
-      stream.__torrentioCached === true
-    ))
-    .map((stream) => ({ ...stream, __cached: true }));
-}
-
-function torrentioResolutionTier(stream) {
-  const value = `${stream.quality || ''} ${stream.title || ''} ${stream.name || ''}`.toLowerCase();
-  if (/\b(2160p|2160|4k)\b/.test(value)) return '2160p';
-  if (/\b(1080p|1080)\b/.test(value)) return '1080p';
-  if (/\b(720p|720)\b/.test(value)) return '720p';
-  return 'other';
-}
-
-// Intentionally exposes counts only: no source URLs, raw titles, hashes, or
-// debrid credentials. It shares the normal Torrentio request path so its
-// measurements reflect the same upstream response and cache filtering.
-async function diagnoseTorrentio(imdbId, mediaType, seasonNum, episodeNum) {
-  const startedAt = Date.now();
-  const settings = global.SCRAPER_SETTINGS || {};
-
-  // Deliberately does not gate on the vendored providers/torrentio.js being
-  // loadable. Torrentio is fetched directly by fetchTorrentioStreams and that
-  // module is not on the path at all, so a failure to load it made diagnostics
-  // report the source as unavailable while it was in fact working normally —
-  // the one answer a diagnostic route must never give wrongly.
-  try {
-    const { streams, upstream } = await fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum, { diagnostics: true });
-    const cachedStreams = await filterCachedTorrentioStreams(streams);
-    const cachedByResolution = { '2160p': 0, '1080p': 0, '720p': 0, other: 0 };
-    for (const stream of cachedStreams) {
-      cachedByResolution[torrentioResolutionTier(stream)] += 1;
-    }
-
-    return {
-      loaded: true,
-      debridProvider: settings.debridProvider || null,
-      debridKeyPresent: Boolean(settings.debridKey),
-      upstream,
-      adapterStreamCount: streams.length,
-      cachedStreamCount: cachedStreams.length,
-      cachedByResolution,
-      selectedTiers: {
-        '2160p': cachedByResolution['2160p'] > 0,
-        '1080p': cachedByResolution['1080p'] > 0
-      },
-      elapsedMs: Date.now() - startedAt
-    };
-  } catch (error) {
-    console.warn('Torrentio diagnostics failed:', error.message);
-    return {
-      loaded: true,
-      debridProvider: settings.debridProvider || null,
-      debridKeyPresent: Boolean(settings.debridKey),
-      error: 'torrentio_request_failed',
-      elapsedMs: Date.now() - startedAt
-    };
-  }
-}
-
-/**
- * Torrentio needs only the IMDb id - no TMDB lookup - unlike every other
+ * AIOStreams needs only the IMDb id - no TMDB lookup - unlike every other
  * provider here, which is keyed on tmdbId. Exposed standalone so the caller
  * can start it the moment a request arrives instead of waiting behind TMDB,
- * which was pure dead time on Torrentio's own budget: TMDB's own timeout is
- * up to 3s, and until it resolved, Torrentio's clock had not even started.
+ * which is pure dead time on AIOStreams' own budget: TMDB's own timeout is
+ * up to 3s, and until it resolved, AIOStreams' clock would not even have
+ * started.
  * Never throws - failures are logged and folded into an empty result, the
- * same contract fetchAllStreams gives every other provider.
+ * same contract fetchAllStreams gives every other provider. No HDR
+ * filtering, cache-provider gating, or retry logic here: whatever the
+ * AIOStreams instance returns is what's shown, curated the same as every
+ * other provider (see src/curate.js).
  */
-async function fetchTorrentioCachedStreams(imdbId, mediaType, seasonNum, episodeNum, { timeoutMs = TORRENTIO_TIMEOUT_MS } = {}) {
+async function fetchAiostreamsProviderStreams(imdbId, mediaType, seasonNum, episodeNum, { timeoutMs = AIOSTREAMS_TIMEOUT_MS } = {}) {
   try {
-    const streams = await filterCachedTorrentioStreams(
-      await fetchTorrentioStreams(imdbId, mediaType, seasonNum, episodeNum, { timeoutMs })
-    );
-    return { providerId: 'torrentio', providerName: 'Torrentio', streams };
+    const streams = await fetchAiostreamsStreams(imdbId, mediaType, seasonNum, episodeNum, { timeoutMs });
+    return { providerId: 'aiostreams', providerName: 'AIOStreams', streams };
   } catch (error) {
-    console.warn('Provider torrentio failed:', error.message);
-    return { providerId: 'torrentio', providerName: 'Torrentio', streams: [] };
+    console.warn('Provider aiostreams failed:', error.message);
+    return { providerId: 'aiostreams', providerName: 'AIOStreams', streams: [] };
   }
 }
 
@@ -405,13 +207,8 @@ async function fetchTorrentioCachedStreams(imdbId, mediaType, seasonNum, episode
  * Calls every loaded provider's getStreams in parallel, tolerating
  * individual failures/timeouts, and returns { providerId, providerName,
  * streams }[] for whichever came back with results.
- *
- * `includeTorrentio: false` excludes it entirely rather than just leaving it
- * to fail on a missing tmdbId - the caller is expected to have already
- * started it via fetchTorrentioCachedStreams and merge that result in
- * separately, which is what src/server.js does.
  */
-async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum, { timeoutMs, includeTorrentio = true } = {}) {
+async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum, { timeoutMs } = {}) {
   // The caller owns the request budget and tells us what is left of it. Without
   // this the provider deadline was a fixed 8s that knew nothing about the time
   // TMDB had already spent, so a slow lookup pushed the whole response past the
@@ -421,14 +218,7 @@ async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum,
     Math.min(PROVIDER_TIMEOUT_MS, timeoutMs ?? PROVIDER_TIMEOUT_MS)
   );
 
-  const providersToRun = includeTorrentio ? loaded : loaded.filter((provider) => provider.id !== 'torrentio');
-
-  const attempts = providersToRun.map(async (provider) => {
-    if (provider.id === 'torrentio') {
-      return fetchTorrentioCachedStreams(imdbId, mediaType, seasonNum, episodeNum, {
-        timeoutMs: Math.min(TORRENTIO_TIMEOUT_MS, deadline)
-      });
-    }
+  const attempts = loaded.map(async (provider) => {
     try {
       const streams = await withTimeout(
         Promise.resolve(provider.module.getStreams(tmdbId, mediaType, seasonNum, episodeNum)),
@@ -445,4 +235,4 @@ async function fetchAllStreams(tmdbId, imdbId, mediaType, seasonNum, episodeNum,
   return Promise.all(attempts);
 }
 
-module.exports = { PROVIDERS, fetchAllStreams, fetchTorrentioCachedStreams, diagnoseTorrentio, isHdrRelease };
+module.exports = { PROVIDERS, fetchAllStreams, fetchAiostreamsProviderStreams };
