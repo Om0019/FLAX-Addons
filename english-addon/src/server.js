@@ -3,7 +3,7 @@ const cors = require('cors');
 const { findByImdbId } = require('./tmdb');
 const { PROVIDERS, fetchAllStreams, fetchAiostreamsProviderStreams } = require('./providers');
 const { extractResolution } = require('./stream-template');
-const { curateStreams, curateAiostreamsStreams } = require('./curate');
+const { curateStreams } = require('./curate');
 const { dedupeByUrl, isProbeable, normalizeStream } = require('./response');
 const { STREAM_PROBE_TIMEOUT_MS, selectPlayableStreams } = require('./stream-probe');
 
@@ -101,16 +101,17 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     ));
 
     // AIOStreams is an additional debrid-backed option, not one of the five
-    // regular-provider slots, and is curated separately from them - see
-    // curateAiostreamsStreams in curate.js for why it isn't collapsed to one
-    // entry the way every other provider is.
+    // regular-provider slots: every result it returns is kept, uncapped and
+    // uncollapsed, since its own instance already decides what's worth
+    // returning (see src/providers/aiostreams.js). Only the other providers
+    // go through curateStreams' 5-slot, one-entry-per-provider cap.
     //
     // Expressed as a function of the still-viable entries rather than computed
     // once, because the probe below re-runs it after dropping dead links. That
-    // is what keeps both limits true of the final response and not merely of
-    // the first guess at it.
+    // is what keeps the cap true of the final response and not merely of the
+    // first guess at it.
     const curate = (available) => [
-      ...curateAiostreamsStreams(available.filter((entry) => entry.providerId === 'aiostreams')),
+      ...available.filter((entry) => entry.providerId === 'aiostreams'),
       ...curateStreams(available.filter((entry) => entry.providerId !== 'aiostreams'))
     ];
 

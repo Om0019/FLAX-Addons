@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { curateStreams, curateAiostreamsStreams, resolutionTier } = require('../src/curate');
+const { curateStreams, resolutionTier } = require('../src/curate');
 
 const entry = (providerId, resolution) => ({ providerId, providerName: providerId, resolution });
 
@@ -78,42 +78,4 @@ test('resolutionTier treats an unlabeled resolution the same as a below-720p one
   assert.equal(resolutionTier(null), resolutionTier('480p'));
   assert.equal(resolutionTier(undefined), 'fallback');
   assert.equal(resolutionTier('Auto'), 'fallback');
-});
-
-// Regression: a debrid-backed provider can routinely confirm more than one
-// result for the same title (fifteen 2160p results was the observed count
-// for Torrentio on a real title, before AIOStreams replaced it), and keeping
-// several of them regardless of tier meant every visible slot claimed the
-// same resolution - the other tiers it had also confirmed never got a slot
-// at all.
-test('aiostreams keeps at most one entry per resolution tier, not several of the same one', () => {
-  const entries = Array.from({ length: 7 }, () => entry('aiostreams', '2160p'));
-
-  const selected = curateAiostreamsStreams(entries);
-
-  assert.equal(selected.length, 1, 'duplicates in the same tier do not crowd out other tiers');
-  assert.equal(selected[0].resolution, '2160p');
-});
-
-test('aiostreams entries are ranked by resolution only, best first, one per tier', () => {
-  const entries = [entry('aiostreams', '1080p'), entry('aiostreams', '2160p'), entry('aiostreams', null)];
-
-  const selected = curateAiostreamsStreams(entries);
-
-  assert.deepEqual(selected.map((item) => item.resolution), ['2160p', '1080p', null]);
-});
-
-test('aiostreams surfaces up to one entry per tier: 2160p, 1080p, 720p, and unknown', () => {
-  const entries = [
-    entry('aiostreams', '2160p'),
-    entry('aiostreams', '2160p'),
-    entry('aiostreams', '1080p'),
-    entry('aiostreams', '720p'),
-    entry('aiostreams', 'Auto'),
-    entry('aiostreams', null)
-  ];
-
-  const selected = curateAiostreamsStreams(entries);
-
-  assert.deepEqual(selected.map((item) => item.resolution), ['2160p', '1080p', '720p', 'Auto']);
 });

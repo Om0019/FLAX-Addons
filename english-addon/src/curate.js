@@ -1,8 +1,9 @@
 /**
  * Trims the combined stream list to at most 5 non-AIOStreams streams, ranked
- * by provider reliability first and resolution second. (AIOStreams has its
- * own separate slots, added on top in server.js - this cap doesn't count
- * them.)
+ * by provider reliability first and resolution second. AIOStreams entries
+ * never pass through this at all - server.js adds every one of them to the
+ * response uncapped and uncollapsed, since the AIOStreams instance itself is
+ * already responsible for deciding what's worth returning.
  *
  * Reliability dominates. A provider several ranks down in PROVIDER_PRIORITY
  * does not get to jump a reliable provider by claiming a higher resolution -
@@ -86,32 +87,4 @@ function curateStreams(entries) {
     .slice(0, MAX_STREAMS);
 }
 
-// Separate from MAX_STREAMS deliberately: AIOStreams is one provider
-// surfacing many distinct debrid-backed results (different releases,
-// different hashes), not many providers each claiming a title. The "one
-// entry per provider" rule in curateStreams doesn't apply here.
-//
-// Keeping up to 5 entries ranked by resolution alone, on the theory that
-// discarding any of AIOStreams' confirmed results is a waste, has the same
-// failure mode it had for Torrentio: a title with many results skews toward
-// one tier, so those 5 slots can end up all 2160p while 1080p/720p/unknown
-// results (just as valid) never show at all. One entry per resolution tier
-// fixes that: the list is capped at TIER_ORDER.length (2160p/4k, 1080p,
-// 720p, unknown) by construction, and each slot is a genuinely different
-// quality rather than a coin flip between same-tier duplicates.
-/**
- * @param {{ resolution: string|null }[]} entries all already known to be AIOStreams'
- * @returns entries to keep, at most one per resolution tier, best tier first
- */
-function curateAiostreamsStreams(entries) {
-  const bestPerTier = new Map();
-  for (const entry of entries) {
-    const tier = resolutionTier(entry.resolution);
-    if (!bestPerTier.has(tier)) {
-      bestPerTier.set(tier, entry);
-    }
-  }
-  return TIER_ORDER.map((tier) => bestPerTier.get(tier)).filter(Boolean);
-}
-
-module.exports = { curateStreams, curateAiostreamsStreams, resolutionTier, TIER_ORDER };
+module.exports = { curateStreams, resolutionTier, TIER_ORDER };
