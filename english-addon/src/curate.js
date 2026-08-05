@@ -89,22 +89,31 @@ function curateStreams(entries) {
 // Separate from MAX_STREAMS deliberately: Torrentio is one provider
 // surfacing many distinct cached torrents (different releases, different
 // hashes), not many providers each claiming a title. The "one entry per
-// provider" rule in curateStreams doesn't apply here - collapsing Torrentio
-// to a single stream would have been throwing away the other cached
-// releases TorBox already confirmed are instant, for no reason but an
-// arbitrary cap. Ranked by resolution only, since every entry already comes
-// from the one most-trusted source and there is no second provider to break
-// ties against.
-const TORRENTIO_STREAM_LIMIT = 5;
-
+// provider" rule in curateStreams doesn't apply here.
+//
+// It used to keep up to 5 entries ranked by resolution alone, on the theory
+// that discarding any of TorBox's confirmed-instant releases was a waste.
+// In practice a title with many cached releases skews toward one tier -
+// fifteen 2160p torrents was the observed count for a real title - so those
+// 5 slots were routinely 2160p five times over: every visible option
+// claimed the same resolution, with 1080p/720p/unknown releases (just as
+// instant) never shown at all. One entry per resolution tier fixes that:
+// the list is capped at TIER_ORDER.length (2160p/4k, 1080p, 720p, unknown)
+// by construction, and each slot is a genuinely different quality rather
+// than a coin flip between same-tier duplicates.
 /**
  * @param {{ resolution: string|null }[]} entries all already known to be Torrentio's
- * @returns entries to keep, ordered highest resolution first
+ * @returns entries to keep, at most one per resolution tier, best tier first
  */
 function curateTorrentioStreams(entries) {
-  return [...entries]
-    .sort((a, b) => tierRank(a) - tierRank(b))
-    .slice(0, TORRENTIO_STREAM_LIMIT);
+  const bestPerTier = new Map();
+  for (const entry of entries) {
+    const tier = resolutionTier(entry.resolution);
+    if (!bestPerTier.has(tier)) {
+      bestPerTier.set(tier, entry);
+    }
+  }
+  return TIER_ORDER.map((tier) => bestPerTier.get(tier)).filter(Boolean);
 }
 
 module.exports = { curateStreams, curateTorrentioStreams, resolutionTier, TIER_ORDER };
