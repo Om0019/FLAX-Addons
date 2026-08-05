@@ -82,20 +82,37 @@ test('resolutionTier treats an unlabeled resolution the same as a below-720p one
 
 // Regression: TorBox routinely confirms more than one cached release for the
 // same title (fifteen 2160p torrents was the observed count for a real
-// title), and the old logic kept exactly one per known tier - discarding
-// fourteen of them regardless of how many were genuinely instant.
-test('torrentio keeps multiple distinct releases in the same tier, up to its own limit', () => {
+// title), and keeping several of them regardless of tier meant every
+// visible slot claimed the same resolution - the other tiers TorBox had
+// also confirmed instant never got a slot at all.
+test('torrentio keeps at most one entry per resolution tier, not several of the same one', () => {
   const entries = Array.from({ length: 7 }, () => entry('torrentio', '2160p'));
 
   const selected = curateTorrentioStreams(entries);
 
-  assert.equal(selected.length, 5, 'capped at the torrentio-specific limit, not collapsed to one');
+  assert.equal(selected.length, 1, 'duplicates in the same tier do not crowd out other tiers');
+  assert.equal(selected[0].resolution, '2160p');
 });
 
-test('torrentio entries are ranked by resolution only, best first', () => {
+test('torrentio entries are ranked by resolution only, best first, one per tier', () => {
   const entries = [entry('torrentio', '1080p'), entry('torrentio', '2160p'), entry('torrentio', null)];
 
   const selected = curateTorrentioStreams(entries);
 
   assert.deepEqual(selected.map((item) => item.resolution), ['2160p', '1080p', null]);
+});
+
+test('torrentio surfaces up to one entry per tier: 2160p, 1080p, 720p, and unknown', () => {
+  const entries = [
+    entry('torrentio', '2160p'),
+    entry('torrentio', '2160p'),
+    entry('torrentio', '1080p'),
+    entry('torrentio', '720p'),
+    entry('torrentio', 'Auto'),
+    entry('torrentio', null)
+  ];
+
+  const selected = curateTorrentioStreams(entries);
+
+  assert.deepEqual(selected.map((item) => item.resolution), ['2160p', '1080p', '720p', 'Auto']);
 });
