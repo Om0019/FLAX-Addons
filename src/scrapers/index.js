@@ -477,6 +477,13 @@ async function collectScraperResults(tasks, timeoutMs, onResult, options = {}) {
   const getConfirmedCount = options.getConfirmedCount || (() => 0);
 
   const hasEnoughStreamsForFastReturn = () => {
+    // AIOStreams is the addon's only debrid-backed, non-probed source. Its own
+    // round trip is slower than the HTML scrapers', so without this it lost
+    // the race whenever two of them answered quickly with enough streams
+    // between them: fast-return fired, and abortPendingScrapers cancelled
+    // AIOStreams' still-in-flight request before it ever got to report -
+    // silently, and non-deterministically depending on network timing on any
+    // given request. Do not return a partial response before it has reported.
     if (![...requiredNames].every((name) => results.some((result) => result.name === name))) {
       return false;
     }
@@ -1370,7 +1377,8 @@ async function getStreamsUncached(type, id, season, episode) {
       (streams) => startEagerValidation(streams, validator),
       {
         getConfirmedCount: () => validator.confirmed,
-        gate: fastReturnGate
+        gate: fastReturnGate,
+        requiredNames: ['AIOStreams']
       }
     );
 
