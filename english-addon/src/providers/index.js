@@ -250,8 +250,8 @@ function withTimeout(promise, ms, label) {
  * Never throws - failures are logged and folded into an empty result, the
  * same contract fetchAllStreams gives every other provider. No HDR
  * filtering, cache-provider gating, or retry logic here: whatever the
- * AIOStreams instance returns is what's shown, curated the same as every
- * other provider (see src/curate.js).
+ * AIOStreams instance returns is capped to three streams (2160p, 1080p, and
+ * one lower-or-unlabeled) by curateAiostreams (see src/curate.js).
  */
 async function fetchAiostreamsProviderStreams(imdbId, mediaType, seasonNum, episodeNum, { timeoutMs = AIOSTREAMS_TIMEOUT_MS } = {}) {
   try {

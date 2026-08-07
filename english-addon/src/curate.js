@@ -1,9 +1,9 @@
 /**
  * Trims the combined stream list to at most 5 non-AIOStreams streams, ranked
  * by provider reliability first and resolution second. AIOStreams entries
- * never pass through this at all - server.js adds every one of them to the
- * response uncapped and uncollapsed, since the AIOStreams instance itself is
- * already responsible for deciding what's worth returning.
+ * never pass through this at all - they get their own three-tier cap via
+ * curateAiostreams below (one 2160p, one 1080p, one lower/unlabeled), applied
+ * by server.js ahead of this list entirely.
  *
  * Reliability dominates. A provider several ranks down in PROVIDER_PRIORITY
  * does not get to jump a reliable provider by claiming a higher resolution -
@@ -69,6 +69,35 @@ function tierRank(entry) {
   return TIER_ORDER.indexOf(resolutionTier(entry.resolution));
 }
 
+// AIOStreams gets its own three-tier cap, separate from the five-provider
+// PRIMARY_TIERS/FALLBACK_TIER split above: one 2160p pick, one 1080p pick,
+// and one pick for everything else (720p, 480p, 360p, or no resolution info
+// at all, all treated as a single "whatever's playable at a lower tier"
+// slot rather than three separate ones). Unlike curateStreams, this isn't
+// capping *per provider* - AIOStreams is one source - it's capping the
+// whole result to three streams total, one per tier.
+const AIOSTREAMS_TIERS = ['2160p', '1080p', 'other'];
+
+function aiostreamsTier(resolution) {
+  const normalized = String(resolution || '').toLowerCase();
+  if (normalized.includes('2160') || normalized.includes('4k')) return '2160p';
+  if (normalized.includes('1080')) return '1080p';
+  return 'other';
+}
+
+/**
+ * @param {{ resolution: string|null }[]} entries
+ * @returns at most one entry per tier (2160p, 1080p, other), tiers in that order
+ */
+function curateAiostreams(entries) {
+  const bestPerTier = new Map();
+  for (const entry of entries) {
+    const tier = aiostreamsTier(entry.resolution);
+    if (!bestPerTier.has(tier)) bestPerTier.set(tier, entry);
+  }
+  return AIOSTREAMS_TIERS.map((tier) => bestPerTier.get(tier)).filter(Boolean);
+}
+
 /**
  * @param {{ providerId: string, resolution: string|null }[]} entries
  * @returns entries to keep, ordered most reliable provider first
@@ -87,4 +116,4 @@ function curateStreams(entries) {
     .slice(0, MAX_STREAMS);
 }
 
-module.exports = { curateStreams, resolutionTier, TIER_ORDER };
+module.exports = { curateStreams, curateAiostreams, resolutionTier, TIER_ORDER };
