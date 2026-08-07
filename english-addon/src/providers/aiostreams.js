@@ -7,6 +7,12 @@
  * instance itself, not here - this just forwards the request and shapes the
  * response into the { name, title, url, quality, __cached } stream objects
  * every other provider in this addon returns.
+ *
+ * One exception: this is the English addon, and the same AIOStreams instance
+ * also backs the Latino addon (src/scrapers/aiostreams.js) at the repo root,
+ * so its results are a mix of every audio language. Latino-audio results are
+ * dropped here so this addon's list stays English-only; the Latino addon
+ * does the mirror-image filter, keeping only Latino-audio results.
  */
 
 const AIOSTREAMS_BASE_URL = process.env.AIOSTREAMS_BASE_URL
@@ -18,6 +24,21 @@ const AIOSTREAMS_TIMEOUT_MS = 8000;
 
 function authHeader() {
   return `Basic ${Buffer.from(`${AIOSTREAMS_UUID}:${AIOSTREAMS_PASSWORD}`).toString('base64')}`;
+}
+
+// Flags for every country whose primary/co-official language is Spanish, plus
+// the usual keyword spellings. Release titles carry whatever the indexer
+// wrote, and neither signal alone catches everything a tracker writes.
+const LATINO_FLAG_EMOJIS = [
+  '🇪🇸', '🇲🇽', '🇦🇷', '🇨🇴', '🇨🇱', '🇵🇪', '🇻🇪', '🇺🇾', '🇧🇴', '🇪🇨',
+  '🇵🇾', '🇨🇷', '🇵🇦', '🇩🇴', '🇬🇹', '🇭🇳', '🇳🇮', '🇸🇻', '🇵🇷', '🇬🇶'
+];
+const LATINO_KEYWORD_PATTERN = /\b(spanish|espa[nñ]ol|castellano|latino|lat(?:am)?)\b/i;
+
+function isLatinoAudioStream(title) {
+  const text = String(title || '');
+  if (LATINO_FLAG_EMOJIS.some((flag) => text.includes(flag))) return true;
+  return LATINO_KEYWORD_PATTERN.test(text);
 }
 
 async function fetchAiostreamsStreams(imdbId, mediaType, seasonNum, episodeNum, { timeoutMs = AIOSTREAMS_TIMEOUT_MS } = {}) {
@@ -36,14 +57,16 @@ async function fetchAiostreamsStreams(imdbId, mediaType, seasonNum, episodeNum, 
     const results = payload?.success ? payload.data?.results : null;
     if (!Array.isArray(results)) return [];
 
-    return results.map((result) => ({
-      name: result.addon || result.indexer || 'AIOStreams',
-      title: result.filename || result.parsedFile?.title || 'AIOStreams',
-      url: result.url,
-      quality: result.parsedFile?.resolution || null,
-      size: result.size || null,
-      __cached: result.cached === true
-    }));
+    return results
+      .filter((result) => !isLatinoAudioStream(result.filename || result.parsedFile?.title))
+      .map((result) => ({
+        name: result.addon || result.indexer || 'AIOStreams',
+        title: result.filename || result.parsedFile?.title || 'AIOStreams',
+        url: result.url,
+        quality: result.parsedFile?.resolution || null,
+        size: result.size || null,
+        __cached: result.cached === true
+      }));
   } catch (error) {
     console.warn(`AIOStreams request failed: ${error.message}`);
     return [];
@@ -52,4 +75,4 @@ async function fetchAiostreamsStreams(imdbId, mediaType, seasonNum, episodeNum, 
   }
 }
 
-module.exports = { fetchAiostreamsStreams };
+module.exports = { fetchAiostreamsStreams, __test: { isLatinoAudioStream } };

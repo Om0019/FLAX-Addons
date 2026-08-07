@@ -44,11 +44,15 @@ Authorization: Basic base64(uuid:password)
 
 Configured via `AIOSTREAMS_BASE_URL` / `AIOSTREAMS_UUID` /
 `AIOSTREAMS_PASSWORD` env vars (each has a working default baked into
-`aiostreams.js`; override for a different instance or account). There is no
+`aiostreams.js`; override for a different instance or account). No
 filtering — no HDR filtering, debrid-cache gating, URL dedupe, or retry
-logic — layered on top anywhere in this addon: the AIOStreams instance is
-expected to do its own filtering, and every result it returns is passed
-straight through to Stremio.
+logic — is layered on top anywhere in this addon, with one exception: the
+same AIOStreams instance also backs the Latino addon at the repo root
+(`src/scrapers/aiostreams.js`), so its results mix every audio language.
+`aiostreams.js` here drops anything tagged Latino-audio (flag emoji or a
+`latino`/`castellano`/`español`/`spanish` keyword) so this addon's list stays
+English-only; everything else the instance returns is passed straight
+through to Stremio.
 
 Verified end-to-end against the running server (`tt0137523` / Fight Club):
 35 streams back from 6 of 11 providers in ~5.8s. A series lookup

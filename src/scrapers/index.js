@@ -10,6 +10,7 @@ const tlnovelas = require('./tlnovelas');
 const novelas360 = require('./novelas360');
 const ennovelas = require('./ennovelas');
 const embed69 = require('./embed69');
+const aiostreams = require('./aiostreams');
 const { fetchTextWithTimeout, normalizeUrl } = require('../http');
 const { hasBlockedIpLiteralHost } = require('../net-guard');
 const { createTtlCache } = require('../ttl-cache');
@@ -35,6 +36,11 @@ const SOURCE_DEADLINE_HEADROOM_MS = 1000;
 const MAX_SOURCE_TIMEOUT_MS = SCRAPER_COLLECTION_TIMEOUT_MS - SOURCE_DEADLINE_HEADROOM_MS;
 const SCRAPER_TIMEOUT_MS = Math.min(10000, MAX_SOURCE_TIMEOUT_MS);
 const SOLOLATINO_TIMEOUT_MS = MAX_SOURCE_TIMEOUT_MS;
+// AIOStreams' own debrid-resolution round trip runs behind whatever debrid
+// provider its instance is configured with, on top of its own indexer
+// lookup, so it gets a longer budget than the HTML scrapers — up to the
+// ceiling above.
+const AIOSTREAMS_TIMEOUT_MS = MAX_SOURCE_TIMEOUT_MS;
 const EMPTY_RESULT_GRACE_MS = 3500;
 // Return as soon as this many sources have produced this many streams between
 // them. Requiring two sources rather than one keeps the early exit from simply
@@ -1292,7 +1298,8 @@ async function getStreamsUncached(type, id, season, episode) {
       createScraperTask(tlnovelas, 'TLNovelas', buildScraperArgs('TLNovelas', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
       createScraperTask(novelas360, 'Novelas360', buildScraperArgs('Novelas360', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
       createScraperTask(ennovelas, 'Ennovelas', buildScraperArgs('Ennovelas', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
-      createScraperTask(embed69, 'Embed69', buildScraperArgs('Embed69', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles, { tmdbId })
+      createScraperTask(embed69, 'Embed69', buildScraperArgs('Embed69', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles, { tmdbId }),
+      createScraperTask(aiostreams, 'AIOStreams', buildScraperArgs('AIOStreams', title, originalTitle, year, type, season, episode), AIOSTREAMS_TIMEOUT_MS, extraTitles, { imdbId })
     ];
 
     if (ENABLE_CINEHDPLUS) {
