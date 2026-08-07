@@ -115,6 +115,13 @@ function loadOrchestratorWith(stubs) {
 
 // Enough good streams to trip the early exit, plus one that is still being probed
 // when it fires. The slow one has not failed anything — it must survive.
+//
+// Exercised directly against validatePlayableStreams rather than through the full
+// getStreams orchestrator: curateNonAiostreams (src/curate.js, tested separately
+// in test_curate.js) caps a request's non-AIOStreams streams to 3 total, one per
+// scraper - going through getStreams here would mean this test's 4 sources
+// (3 good + 1 slow) could never all survive regardless of whether validation
+// itself preserved the unproven one, which is not what this test is about.
 async function testUnprovenStreamsSurviveTheEarlyExit() {
   const { server, port } = await startOrigin();
   const origin = `http://127.0.0.1:${port}`;
@@ -122,13 +129,18 @@ async function testUnprovenStreamsSurviveTheEarlyExit() {
   const slowUrl = `${origin}/slow/0/master.m3u8`;
 
   try {
-    const orchestrator = loadOrchestratorWith({
-      LaMovie: stubScraper('LaMovie', goodUrls),
-      Cuevana3i: stubScraper('Cuevana3i', [slowUrl])
-    });
+    const { __test } = require(ORCHESTRATOR);
+    const rawStreams = [...goodUrls, slowUrl].map((url, i) => ({ name: 'Test', title: `Test ${i}`, url }));
+    const controller = new AbortController();
+    const validator = __test.createStreamValidator(controller.signal, () => {});
 
-    const streams = await orchestrator.getStreams('movie', 'tmdb:movie:1', null, null);
-    const urls = streams.map((stream) => stream.url);
+    const selected = await __test.validatePlayableStreams(
+      rawStreams.map(__test.sanitizeStream).filter(Boolean),
+      validator,
+      controller,
+      8000
+    );
+    const urls = selected.map((stream) => stream.url);
 
     for (const url of goodUrls) {
       assert.ok(urls.includes(url), `confirmed stream ${url} is returned`);
@@ -193,7 +205,10 @@ async function testAllFailedFallsBackToCandidates() {
     });
 
     const streams = await orchestrator.getStreams('movie', 'tmdb:movie:3', null, null);
-    assert.strictEqual(streams.length, badUrls.length, 'candidates survive a total validation wipeout');
+    // Both candidates are from the same scraper, so curateNonAiostreams
+    // (src/curate.js) keeps only one of them - the wipeout fallback still
+    // has to go through the same per-scraper cap as everything else.
+    assert.strictEqual(streams.length, 1, 'a candidate survives a total validation wipeout');
   } finally {
     server.close();
   }

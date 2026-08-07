@@ -14,6 +14,7 @@ const aiostreams = require('./aiostreams');
 const { fetchTextWithTimeout, normalizeUrl } = require('../http');
 const { hasBlockedIpLiteralHost } = require('../net-guard');
 const { createTtlCache } = require('../ttl-cache');
+const { curateNonAiostreams } = require('../curate');
 const {
   bestQuality,
   claimedQuality,
@@ -1416,7 +1417,12 @@ async function getStreamsUncached(type, id, season, episode) {
       if (res.status === 'fulfilled') {
         if (res.value && res.value.length > 0) {
           console.log(`${name} returned ${res.value.length} streams`);
-          streams.push(...res.value);
+          // Tagged with the orchestrator's own task label - not read from
+          // stream.name, which for AIOStreams is the upstream addon/indexer
+          // name, not "AIOStreams" - so curateNonAiostreams (src/curate.js)
+          // can tell an AIOStreams result from a scraper's own regardless of
+          // what either wrote into `name`.
+          streams.push(...res.value.map((stream) => ({ ...stream, __sourceLabel: name })));
         } else {
           console.log(`${name} returned 0 streams`);
         }
@@ -1434,9 +1440,13 @@ async function getStreamsUncached(type, id, season, episode) {
     // variants no longer resolve scores 1, so it landed at the top of the list
     // and was the first thing a viewer clicked.
     const selected = await validatePlayableStreams(sanitizedStreams, validator, validationController, remainingBudgetMs());
+    // Caps the non-AIOStreams streams to 3, one per scraper, favoring the
+    // scrapers reliability testing found actually deliver a playable link -
+    // AIOStreams itself is exempt and stays uncapped. See src/curate.js.
+    const curated = curateNonAiostreams(selected);
     // Labeling happens here rather than inside validatePlayableStreams, which has
     // three ways out: a label written twice reads as "1080p • 1080p".
-    return selected.map(withQualityLabel);
+    return curated.map(withQualityLabel);
 
   } catch (err) {
     console.error('Error in combined getStreams:', err.message);

@@ -1,5 +1,5 @@
 /**
- * Trims the combined stream list to at most 5 non-AIOStreams streams, ranked
+ * Trims the combined stream list to at most 3 non-AIOStreams streams, ranked
  * by provider reliability first and resolution second. AIOStreams entries
  * never pass through this at all - they get their own three-tier cap via
  * curateAiostreams below (one 2160p, one 1080p, one lower/unlabeled), applied
@@ -17,30 +17,40 @@
  * because the rule that lets a reliable, multi-resolution provider through
  * at all only grants it one slot, not one per resolution it happens to
  * offer. hdhub4u having 2160p, 1080p and 720p links for the same title is
- * one strong source, not three of the five slots.
+ * one strong source, not three of the three slots.
  *
  * AIOStreams goes first by design, ahead of this list entirely: when it has
  * a result, that's a direct debrid-backed link and gets first pick, as
  * server.js's own AIOStreams handling reflects. Reliability here otherwise
- * reflects what was actually observed working: hdhub4u/uhdmovies/4khdhubnew/
- * castle consistently returned playable links in testing. streamflix is
- * ranked below that: its links only state a resolution when the release
- * filename happens to carry one. videasy is ranked last of the working
- * sources: most of its servers answer 404/500 on any given title, worse
- * than peachify's own hit rate. allwish is anime-only and contributes
- * nothing to anything else, so it costs nothing to leave in rotation at the
- * end.
+ * reflects a 12-title reliability probe (6 popular + 6 non-popular
+ * movies/series, each provider's raw output sample-probed for actual
+ * playability, not just whether it returned a URL):
+ *
+ *   videasy       92%      hdhub4u     33%
+ *   4khdhubnew    75%      castle      33%
+ *   uhdmovies     50%      streamflix   8%
+ *
+ * videasy and 4khdhubnew held up on both popular and non-popular titles.
+ * hdhub4u/uhdmovies/castle looked strong on blockbusters alone (as high as
+ * 67-83%) but collapsed to 0-17% on non-popular titles - they lean heavily
+ * on trending-content indexes. streamflix returns a URL on nearly every
+ * title (100% hit rate) but the URL is rarely actually playable (8%
+ * confirmed) - ranked near the bottom despite the high hit rate for exactly
+ * that reason. peachify 403s on every server in testing; ranked with
+ * allwish (anime-only, so untested by general movies/series) at the end
+ * rather than dropped, since either could still contribute on a title the
+ * probe sample didn't cover.
  *
  * netmirror, vidlink, vidsrc and vidfast are absent deliberately - see the
  * registry in src/providers/index.js for what each one does now.
  */
 
 const PROVIDER_PRIORITY = [
-  'aiostreams', 'hdhub4u', 'uhdmovies', '4khdhubnew', 'castle',
-  'streamflix', 'peachify', 'videasy', 'allwish'
+  'aiostreams', 'videasy', '4khdhubnew', 'uhdmovies', 'hdhub4u', 'castle',
+  'streamflix', 'peachify', 'allwish'
 ];
 
-const MAX_STREAMS = 5;
+const MAX_STREAMS = 3;
 const PRIMARY_TIERS = ['2160p', '1080p', '720p'];
 // 480p, 360p, and "no resolution info at all" are all treated as one bucket:
 // each is a worse bet than any primary tier, so there's no reason to rank
