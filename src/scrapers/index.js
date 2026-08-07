@@ -153,18 +153,33 @@ function getStreamHost(stream) {
   return host;
 }
 
+/**
+ * The "torrent"/"p2p" checks below exist to catch a raw magnet or an
+ * unresolved P2P listing slipping through as if it were a playable URL. A
+ * cached debrid link is neither of those, even when its title or provider
+ * name happens to mention one — AIOStreams (src/scrapers/aiostreams.js)
+ * reports the addon its internal aggregation sourced a result from as that
+ * result's `name`, and one of the addons behind it is itself called
+ * "Torrentio", which is a coincidence of AIOStreams' own configuration and
+ * has nothing to do with a torrent/magnet file. `__cached` is set only on
+ * already-resolved HTTPS links, so it's what the exemption keys on rather
+ * than any particular provider name.
+ */
 function isKnownBadStream(stream) {
   const url = (stream.url || '').toLowerCase();
   const title = (stream.title || '').toLowerCase();
   const name = (stream.name || '').toLowerCase();
+  const isCachedResolvedLink = stream.__cached === true;
   return url.includes('test-videos.co.uk')
     || url.includes('big_buck_bunny')
     || url.includes('magnet:')
     || url.includes('.torrent')
     || url.includes('strp2p.com')
-    || title.includes('p2p')
-    || title.includes('torrent')
-    || name.includes('torrent');
+    || (!isCachedResolvedLink && (
+      title.includes('p2p')
+      || title.includes('torrent')
+      || name.includes('torrent')
+    ));
 }
 
 function getHostHealth(host) {
