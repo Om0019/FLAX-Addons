@@ -21,14 +21,16 @@ function authHeader() {
   return `Basic ${Buffer.from(`${AIOSTREAMS_UUID}:${AIOSTREAMS_PASSWORD}`).toString('base64')}`;
 }
 
-// Flags for every country whose primary/co-official language is Spanish, plus
-// the usual keyword spellings. Release titles carry whatever the indexer
-// wrote, and neither signal alone catches everything a tracker writes.
+// Flags for Latin American Spanish-speaking countries only — deliberately
+// excludes 🇪🇸. Release titles that carry both an audio-language tag list a
+// separate "castellano" (Spain) track from "latino" ("ENG.LATINO.CASTELLANO...")
+// as two distinct dubs, so castellano/español/spanish are not treated as
+// synonyms for latino here: including them would pull in Spain-only audio.
 const LATINO_FLAG_EMOJIS = [
-  '🇪🇸', '🇲🇽', '🇦🇷', '🇨🇴', '🇨🇱', '🇵🇪', '🇻🇪', '🇺🇾', '🇧🇴', '🇪🇨',
+  '🇲🇽', '🇦🇷', '🇨🇴', '🇨🇱', '🇵🇪', '🇻🇪', '🇺🇾', '🇧🇴', '🇪🇨',
   '🇵🇾', '🇨🇷', '🇵🇦', '🇩🇴', '🇬🇹', '🇭🇳', '🇳🇮', '🇸🇻', '🇵🇷', '🇬🇶'
 ];
-const LATINO_KEYWORD_PATTERN = /\b(spanish|espa[nñ]ol|castellano|latino|lat(?:am)?)\b/i;
+const LATINO_KEYWORD_PATTERN = /\b(latino|lat(?:am)?)\b/i;
 
 function isLatinoAudioStream(title) {
   const text = String(title || '');

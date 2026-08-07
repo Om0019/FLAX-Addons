@@ -49,10 +49,12 @@ filtering — no HDR filtering, debrid-cache gating, URL dedupe, or retry
 logic — is layered on top anywhere in this addon, with one exception: the
 same AIOStreams instance also backs the Latino addon at the repo root
 (`src/scrapers/aiostreams.js`), so its results mix every audio language.
-`aiostreams.js` here drops anything tagged Latino-audio (flag emoji or a
-`latino`/`castellano`/`español`/`spanish` keyword) so this addon's list stays
-English-only; everything else the instance returns is passed straight
-through to Stremio.
+`aiostreams.js` here drops anything tagged Latin American Spanish audio (a
+Latin American country flag emoji, or a `latino`/`latam` keyword —
+deliberately not 🇪🇸/`castellano`/`español`/`spanish`, since a release often
+lists Spain and Latin American dubs as two separate tracks) so this addon's
+list stays English-only; everything else the instance returns is passed
+straight through to Stremio.
 
 Verified end-to-end against the running server (`tt0137523` / Fight Club):
 35 streams back from 6 of 11 providers in ~5.8s. A series lookup
