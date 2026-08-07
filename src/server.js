@@ -1,0 +1,955 @@
+const express = require('express');
+const cors = require('cors');
+const { Readable } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
+const scrapers = require('./scrapers');
+const { fetchTextWithTimeout, fetchWithTimeout } = require('./http');
+const { BlockedAddressError, MAX_REDIRECT_HOPS, UnresolvableHostError, assertPublicUrl } = require('./net-guard');
+const { applyStreamTemplate } = require('./stream-template');
+// Mounted as a sub-app at /english below, so both addons are reachable from
+// one deployment (one URL, one port) and the landing page can link to both.
+// english-addon/ stays a fully independent, standalone-runnable addon on its
+// own otherwise (own package.json, own index.js) - this is additive.
+const englishAddonApp = require('../english-addon/src/server');
+
+const app = express();
+const PROXY_FETCH_TIMEOUT_MS = 8000;
+const DEFAULT_REFERER = 'https://sololatino.net/';
+const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+// Enable CORS for Stremio client compatibility
+app.use(cors());
+// No JSON body parser: every route here is a GET, so parsing request bodies would
+// only add surface without ever being used.
+
+// Declare the Stremio Addon Manifest
+const manifest = {
+  id: 'com.latino.spanish',
+  version: '1.0.1',
+  name: 'Latino 🇲🇽',
+  // Lists only the sources that actually run. CineHDPlus is behind a Cloudflare
+  // managed challenge and is disabled (see scrapers/cinehdplus.js), so naming it
+  // here promised Stremio users a source that can never return anything.
+  description: 'Películas y Series en Español Latino y Castellano directas de Cinecalidad, SoloLatino, TioPlus, Cuevana3i, LaMovie, PelisPedia, TLNovelas, Novelas360 y AIOStreams (audio Latino).',
+  logo: 'https://images.unsplash.com/photo-1574267431422-7bda297781f5?q=80&w=256&auto=format&fit=crop',
+  background: 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?q=80&w=1280&auto=format&fit=crop',
+  types: ['movie', 'series'],
+  resources: [
+    {
+      name: 'stream',
+      types: ['movie', 'series'],
+      idPrefixes: ['tt', 'tmdb']
+    }
+  ],
+  catalogs: []
+};
+
+/**
+ * X-Forwarded-Proto is a list, not a value: every proxy in the chain appends to
+ * it, so a deployment behind two of them sends "https, http". Pasting the whole
+ * header in front of :// built a base URL of "https, http://host", and since every
+ * URI in a rewritten HLS manifest is built on that base, nothing proxied played at
+ * all. Only the first hop describes the scheme the client actually used, and
+ * anything that is not http or https is not a scheme we are willing to emit.
+ */
+function getForwardedProtocol(req) {
+  const header = req.headers['x-forwarded-proto'];
+  const first = String(Array.isArray(header) ? header[0] : header || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+
+  return /^https?$/.test(first) ? first : null;
+}
+
+function getPublicBaseUrl(req) {
+  const host = req.get('host');
+  const protocol = getForwardedProtocol(req) || req.protocol;
+  return `${protocol}://${host}`;
+}
+
+function shouldProxyStream(stream) {
+  try {
+    const url = new URL(stream.url);
+    const host = url.hostname.toLowerCase();
+    const title = (stream.title || '').toLowerCase();
+    const hasProxyHeaders = Boolean(stream?.behaviorHints?.proxyHeaders?.request);
+    const headerSensitiveHost = host.includes('acek-cdn.com')
+      || host.includes('dramiyos-cdn.com')
+      || host.includes('cfglobalcdn.com')
+      || host.includes('turboviplay.com')
+      || host.includes('premilkyway.com')
+      || host.includes('cdn-tnmr.org')
+      || host.includes('mediafire.com')
+      || host.includes('fireload.com');
+
+    return title.includes('premium')
+      || headerSensitiveHost
+      || hasProxyHeaders;
+  } catch {
+    return false;
+  }
+}
+
+function getProxyFilename(targetUrl) {
+  try {
+    const parsed = new URL(targetUrl);
+    const pathname = parsed.pathname.toLowerCase();
+    if (pathname.endsWith('.m3u8')) return 'stream.m3u8';
+    if (pathname.endsWith('.ts')) return 'segment.ts';
+    if (pathname.endsWith('.m4s')) return 'segment.m4s';
+    if (pathname.endsWith('.mp4') || pathname.endsWith('.bin')) return 'stream.mp4';
+    if (pathname.endsWith('.mkv')) return 'stream.mkv';
+    if (pathname.endsWith('.key')) return 'key.key';
+  } catch {
+    // Fall through to the generic name.
+  }
+
+  return 'stream';
+}
+
+// A player seeking or the user hitting stop tears the response down mid-body.
+// That is routine, not a proxy failure, so it must not be logged as an error or
+// answered with a status the client is no longer there to read.
+function isClientDisconnect(error, res) {
+  return res.destroyed
+    || ['ERR_STREAM_PREMATURE_CLOSE', 'ERR_STREAM_DESTROYED', 'ECONNRESET', 'EPIPE'].includes(error?.code);
+}
+
+class TooManyRedirectsError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'TooManyRedirectsError';
+  }
+}
+
+/**
+ * Fetches `startUrl`, following redirects by hand so that *every* hop is vetted.
+ * Letting fetch follow them would mean only the first URL was ever checked, and a
+ * permitted host answering 302 -> http://169.254.169.254/ would sail straight
+ * through the destination filter.
+ *
+ * `buffer` reads the body inside the request deadline, for playlists that are
+ * going to be buffered and rewritten anyway. It is left off for video, where the
+ * body has to stream and a body deadline would abort playback.
+ */
+async function fetchFollowingRedirects(startUrl, options) {
+  const { headers, buffer, timeoutMs, validate = assertPublicUrl } = options;
+  let resolvedUrl = startUrl;
+
+  for (let hop = 0; ; hop += 1) {
+    await validate(resolvedUrl);
+
+    let upstream;
+    let bufferedManifest = null;
+
+    if (buffer) {
+      ({ res: upstream, text: bufferedManifest } = await fetchTextWithTimeout(resolvedUrl, {
+        headers,
+        redirect: 'manual'
+      }, timeoutMs));
+    } else {
+      upstream = await fetchWithTimeout(resolvedUrl, {
+        headers,
+        redirect: 'manual'
+      }, timeoutMs);
+    }
+
+    const location = upstream.status >= 300 && upstream.status < 400
+      ? upstream.headers.get('location')
+      : null;
+
+    if (!location) {
+      return { upstream, bufferedManifest, resolvedUrl };
+    }
+
+    if (hop >= MAX_REDIRECT_HOPS) {
+      throw new TooManyRedirectsError(`Exceeded ${MAX_REDIRECT_HOPS} redirects from ${startUrl}`);
+    }
+
+    // Discard the redirect body so the connection can be reused.
+    if (upstream.body && !upstream.bodyUsed) {
+      await upstream.body.cancel().catch(() => {});
+    }
+
+    resolvedUrl = new URL(location, resolvedUrl).toString();
+  }
+}
+
+/**
+ * `userAgent` is the one the scraper resolved and validated the stream with, and
+ * it travels with the link so playback repeats the request that was proven to
+ * work. Omitted from the URL when it is the default, which is what the proxy
+ * falls back to anyway.
+ */
+function proxiedStreamUrl(baseUrl, targetUrl, referer, userAgent) {
+  const filename = getProxyFilename(targetUrl);
+  const query = `url=${encodeURIComponent(targetUrl)}&referer=${encodeURIComponent(referer || '')}`;
+  const userAgentQuery = userAgent && userAgent !== DEFAULT_USER_AGENT
+    ? `&ua=${encodeURIComponent(userAgent)}`
+    : '';
+
+  return `${baseUrl}/proxy/${filename}?${query}${userAgentQuery}`;
+}
+
+/** The upstream User-Agent for a proxy request: the resolving one, never the client's. */
+function getUpstreamUserAgent(req) {
+  const ua = req.query.ua;
+  return typeof ua === 'string' && ua ? ua : DEFAULT_USER_AGENT;
+}
+
+/**
+ * The upstream Referer for a proxy request. Read in one place because the route
+ * and the manifest rewriter both need it and used to disagree: with no referer on
+ * the link the route sent DEFAULT_REFERER while the rewriter wrote the manifest's
+ * own URL onto every child link. Header-sensitive CDNs are the only reason a
+ * stream is proxied at all, so that had the playlist load and then every segment
+ * arrive with a Referer the playlist never used.
+ */
+function getUpstreamReferer(req) {
+  const referer = req.query.referer;
+  return typeof referer === 'string' && referer ? referer : DEFAULT_REFERER;
+}
+
+function rewriteHlsManifest(manifestText, targetUrl, req) {
+  const baseUrl = getPublicBaseUrl(req);
+  const referer = getUpstreamReferer(req);
+  const userAgent = getUpstreamUserAgent(req);
+
+  const rewriteUri = (uri) => {
+    if (!uri || uri.startsWith('data:')) return uri;
+    const absoluteUrl = new URL(uri, targetUrl).toString();
+    return proxiedStreamUrl(baseUrl, absoluteUrl, referer, userAgent);
+  };
+
+  return manifestText
+    .split(/\r?\n/)
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return line;
+
+      if (trimmed.startsWith('#')) {
+        return line.replace(/URI="([^"]+)"/g, (_match, uri) => `URI="${rewriteUri(uri)}"`);
+      }
+
+      return rewriteUri(trimmed);
+    })
+    .join('\n');
+}
+
+/**
+ * Deliberately the pathname alone. Including the query string means a segment or
+ * an MP4 carrying an unrelated `.m3u8` parameter — a fallback URL, a referrer —
+ * is treated as a playlist, and playlists are buffered whole before being
+ * rewritten. That turns a multi-gigabyte video into a single in-memory string.
+ */
+function isLikelyHlsManifestUrl(url) {
+  try {
+    return /\.m3u8$/i.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
+function wrapProxyStreams(streams, req) {
+  const baseUrl = getPublicBaseUrl(req);
+
+  return streams.map((stream) => {
+    if (!stream?.url || !shouldProxyStream(stream)) {
+      return stream;
+    }
+
+    const requestHeaders = stream?.behaviorHints?.proxyHeaders?.request || {};
+    const proxiedUrl = proxiedStreamUrl(
+      baseUrl,
+      stream.url,
+      requestHeaders.Referer || '',
+      requestHeaders['User-Agent']
+    );
+
+    return {
+      ...stream,
+      url: proxiedUrl,
+      behaviorHints: {
+        ...(stream.behaviorHints || {}),
+        proxyHeaders: {
+          request: {
+            'User-Agent': DEFAULT_USER_AGENT
+          }
+        }
+      }
+    };
+  });
+}
+
+// 1. Manifest Endpoint
+app.get('/manifest.json', (req, res) => {
+  res.json(manifest);
+});
+
+app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
+  const targetUrl = req.query.url;
+  const referer = getUpstreamReferer(req);
+
+  if (!targetUrl || typeof targetUrl !== 'string') {
+    return res.status(400).send('Missing url');
+  }
+
+  try {
+    // Never the client's User-Agent. Several of these CDNs (vimeos, goodstream,
+    // premilkyway) answer 403 to anything that is not a browser, so forwarding
+    // what the player sent meant a stream that passed validation — which probes
+    // with the resolving User-Agent — then failed the moment Stremio played it.
+    const headers = {
+      'User-Agent': getUpstreamUserAgent(req),
+      'Referer': referer,
+      // Asked for explicitly because fetch otherwise advertises gzip and then
+      // decompresses the reply behind our back, which desynchronises the length
+      // and range headers we relay from the bytes we actually forward. Video and
+      // segment bodies are already compressed formats, so identity costs nothing
+      // here. A server that ignores this is still handled below.
+      'Accept-Encoding': 'identity'
+    };
+
+    const range = req.get('range');
+    const requestIsHlsManifest = isLikelyHlsManifestUrl(targetUrl);
+    if (range && !requestIsHlsManifest) {
+      headers.Range = range;
+    }
+
+    const { upstream, bufferedManifest, resolvedUrl } = await fetchFollowingRedirects(targetUrl, {
+      headers,
+      buffer: requestIsHlsManifest,
+      timeoutMs: PROXY_FETCH_TIMEOUT_MS
+    });
+
+    const contentType = upstream.headers.get('content-type') || '';
+    const contentLength = upstream.headers.get('content-length');
+    const contentRange = upstream.headers.get('content-range');
+    const acceptRanges = upstream.headers.get('accept-ranges');
+    const isHlsManifest = requestIsHlsManifest
+      || contentType.toLowerCase().includes('mpegurl')
+      || contentType.toLowerCase().includes('application/vnd.apple');
+
+    // Forcing 200 for anything playlist-shaped hid upstream failures: a 404 or a
+    // Cloudflare interstitial on a .m3u8 URL came back as a valid-looking manifest
+    // with the error page rewritten into it. Only rewrite what actually succeeded.
+    const serveAsManifest = isHlsManifest && upstream.ok;
+
+    res.status(serveAsManifest ? 200 : upstream.status);
+    res.setHeader('Content-Type', serveAsManifest ? 'application/vnd.apple.mpegurl' : (contentType || 'application/octet-stream'));
+    res.setHeader('Content-Disposition', 'inline');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    if (serveAsManifest) {
+      // Only reachable unbuffered when the URL gave no hint and the content-type
+      // revealed a playlist after the fact.
+      const manifestText = bufferedManifest !== null ? bufferedManifest : await upstream.text();
+      res.send(rewriteHlsManifest(manifestText, resolvedUrl, req));
+      return;
+    }
+
+    if (bufferedManifest !== null) {
+      // Body was already read while probing a playlist URL that turned out to be an
+      // error, so relay it as-is rather than trying to stream a consumed body.
+      res.send(bufferedManifest);
+      return;
+    }
+
+    // fetch decompresses a gzip/br/deflate body transparently, so upstream's
+    // Content-Length, Content-Range and Accept-Ranges all describe bytes the
+    // client is never going to receive. Forwarding them made the player expect a
+    // length the connection could not deliver — a stall or a truncated file
+    // partway through, depending on the client. Relaying an encoded body's byte
+    // counts is only correct when nothing re-encoded it in between, so when
+    // upstream encoded it, none of the three are passed on and the response is
+    // simply framed by the connection.
+    const wasDecompressed = Boolean(upstream.headers.get('content-encoding'));
+
+    if (wasDecompressed) {
+      console.warn(`Proxy Stream: upstream ignored Accept-Encoding: identity for ${resolvedUrl}; forwarding without length/range headers`);
+    } else {
+      if (contentRange) res.setHeader('Content-Range', contentRange);
+      if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
+      if (contentLength) res.setHeader('Content-Length', contentLength);
+    }
+
+    if (!upstream.body) {
+      return res.end();
+    }
+
+    // pipeline() applies backpressure, so we only pull from the origin as fast as
+    // the client drains us — a manual res.write() loop ignores the return value and
+    // buffers the whole file in memory against a slow player. It also destroys the
+    // upstream stream when the client goes away, so we stop paying for bytes that
+    // no longer have anywhere to go.
+    await pipeline(Readable.fromWeb(upstream.body), res);
+  } catch (error) {
+    if (isClientDisconnect(error, res)) {
+      return;
+    }
+
+    if (error instanceof TooManyRedirectsError) {
+      console.warn('Proxy Stream Error:', error.message);
+      if (!res.headersSent) return res.status(502).send('Too many redirects');
+      res.destroy();
+      return;
+    }
+
+    // Checked before BlockedAddressError, which it extends. A host that does not
+    // resolve is the upstream being gone, not a URL we refused, and answering 400
+    // told a player its request was malformed when the CDN had simply died.
+    if (error instanceof UnresolvableHostError) {
+      console.warn('Proxy Stream Error:', error.message);
+      if (!res.headersSent) return res.status(502).send('Upstream host did not resolve');
+      res.destroy();
+      return;
+    }
+
+    if (error instanceof BlockedAddressError) {
+      console.warn('Proxy Stream Blocked:', error.message);
+      if (!res.headersSent) return res.status(400).send('Blocked url');
+      res.destroy();
+      return;
+    }
+
+    console.error('Proxy Stream Error:', error.message);
+
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
+
+    res.status(502).send('Proxy error');
+  }
+});
+
+// 2. Stream Endpoint
+app.get('/stream/:type/:id.json', async (req, res) => {
+  const { type, id } = req.params;
+  
+  // Parse season & episode if it is a TV show (series)
+  let cleanId = id;
+  let season = null;
+  let episode = null;
+
+  // Stremio series ID formats:
+  // - IMDb: tt1234567:1:1 (imdbId:season:episode)
+  // - TMDB: tmdb:series:12345:1:1 (tmdb:series:id:season:episode)
+  if (type === 'series') {
+    const parts = id.split(':');
+    if (id.startsWith('tmdb:')) {
+      cleanId = `tmdb:series:${parts[2]}`;
+      season = parseInt(parts[3]) || 1;
+      episode = parseInt(parts[4]) || 1;
+    } else {
+      cleanId = parts[0];
+      season = parseInt(parts[1]) || 1;
+      episode = parseInt(parts[2]) || 1;
+    }
+  }
+
+  console.log(`Stream request: Type=${type}, ID=${cleanId}, Season=${season}, Episode=${episode}`);
+
+  try {
+    const streams = await scrapers.getStreams(type, cleanId, season, episode);
+    const templatedStreams = (streams || []).map((stream) => applyStreamTemplate(stream, manifest.name));
+    const responseStreams = wrapProxyStreams(templatedStreams, req);
+    console.log(`Stream response: ${responseStreams.length} streams for ${type}/${cleanId}`);
+    
+    // If no streams found, return empty array (Stremio format)
+    res.json({ streams: responseStreams });
+  } catch (error) {
+    console.error('Stream Route Error:', error.message);
+    res.json({ streams: [] });
+  }
+});
+
+// The page is ~20KB of static markup around three substitutions, all derived from
+// the origin the request arrived on. Built once per origin rather than per request;
+// bounded because the origin comes from a caller-supplied Host header, which is
+// otherwise an unbounded key.
+const LANDING_PAGE_MAX_ORIGINS = 20;
+const landingPageByOrigin = new Map();
+
+function renderLandingPage(protocol, host) {
+  const manifestUrl = `${protocol}://${host}/manifest.json`;
+  const stremioInstallUrl = `stremio://${host}/manifest.json`;
+  const englishManifestUrl = `${protocol}://${host}/english/manifest.json`;
+  const englishStremioInstallUrl = `stremio://${host}/english/manifest.json`;
+
+  return `
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Latino Addon - Stremio en Español</title>
+  <!-- Google Fonts Outfit & Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+  
+  <style>
+    :root {
+      --bg-color: #07070d;
+      --panel-bg: rgba(18, 18, 29, 0.55);
+      --border-color: rgba(255, 255, 255, 0.08);
+      --primary-color: #8b5cf6;
+      --secondary-color: #ec4899;
+      --accent-color: #3b82f6;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      font-family: 'Inter', sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+      background-image: 
+        radial-gradient(circle at 10% 20%, rgba(139, 92, 246, 0.15) 0%, transparent 40%),
+        radial-gradient(circle at 90% 80%, rgba(236, 72, 153, 0.15) 0%, transparent 40%);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    h1, h2, h3 {
+      font-family: 'Outfit', sans-serif;
+    }
+
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 40px 20px;
+      width: 100%;
+      flex-grow: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+
+    /* Header Styling */
+    header {
+      text-align: center;
+      margin-bottom: 50px;
+    }
+
+    .logo-container {
+      display: inline-block;
+      position: relative;
+      margin-bottom: 20px;
+    }
+
+    .logo-glow {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 120px;
+      height: 120px;
+      background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+      filter: blur(40px);
+      border-radius: 50%;
+      z-index: -1;
+      opacity: 0.8;
+      animation: pulse 4s infinite alternate;
+    }
+
+    .logo {
+      font-size: 4rem;
+      font-weight: 800;
+      background: linear-gradient(135deg, #a78bfa, #f472b6, #60a5fa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      letter-spacing: -2px;
+      text-shadow: 0 0 40px rgba(139, 92, 246, 0.3);
+    }
+
+    .subtitle {
+      font-size: 1.25rem;
+      color: var(--text-muted);
+      margin-top: 10px;
+      font-weight: 300;
+    }
+
+    /* Premium Glassmorphic Cards */
+    .glass-card {
+      background: var(--panel-bg);
+      backdrop-filter: blur(16px) saturate(120%);
+      -webkit-backdrop-filter: blur(16px) saturate(120%);
+      border: 1px solid var(--border-color);
+      border-radius: 24px;
+      padding: 40px;
+      box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+      margin-bottom: 30px;
+    }
+
+    .card-title {
+      font-size: 1.8rem;
+      font-weight: 600;
+      margin-bottom: 25px;
+      text-align: center;
+      background: linear-gradient(90deg, #fff, var(--text-muted));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    /* Grid of Providers */
+    .grid-providers {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 20px;
+      margin-bottom: 40px;
+    }
+
+    .provider-item {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 16px;
+      padding: 20px;
+      text-align: center;
+      transition: all 0.3s ease;
+    }
+
+    .provider-item:hover {
+      transform: translateY(-5px);
+      border-color: rgba(139, 92, 246, 0.4);
+      background: rgba(139, 92, 246, 0.05);
+      box-shadow: 0 5px 15px rgba(139, 92, 246, 0.1);
+    }
+
+    .provider-name {
+      font-weight: 600;
+      font-size: 1.1rem;
+      margin-bottom: 5px;
+    }
+
+    .provider-status {
+      font-size: 0.8rem;
+      color: #10b981; /* Green */
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+    }
+
+    .provider-status.warning {
+      color: #f59e0b; /* Yellow */
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: currentColor;
+    }
+
+    /* Setup & Buttons */
+    .actions {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 20px;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+      color: white;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 1.2rem;
+      padding: 16px 36px;
+      border-radius: 50px;
+      box-shadow: 0 10px 25px -5px rgba(139, 92, 246, 0.5);
+      transition: all 0.3s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      border: none;
+      cursor: pointer;
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 15px 30px -5px rgba(139, 92, 246, 0.7);
+    }
+
+    .btn-secondary {
+      background: transparent;
+      color: var(--text-main);
+      border: 1px solid var(--border-color);
+      text-decoration: none;
+      font-weight: 500;
+      font-size: 0.95rem;
+      padding: 12px 28px;
+      border-radius: 50px;
+      transition: all 0.3s ease;
+      cursor: pointer;
+    }
+
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .manifest-box {
+      width: 100%;
+      max-width: 600px;
+      margin-top: 10px;
+      position: relative;
+    }
+
+    .manifest-input {
+      width: 100%;
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 12px 15px;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      text-align: center;
+      outline: none;
+      font-family: monospace;
+      cursor: text;
+    }
+
+    /* Installation Steps */
+    .steps {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      margin-top: 10px;
+    }
+
+    .step-item {
+      display: flex;
+      gap: 15px;
+      align-items: flex-start;
+    }
+
+    .step-num {
+      background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-family: 'Outfit', sans-serif;
+      flex-shrink: 0;
+    }
+
+    .step-text {
+      font-size: 0.95rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
+    .step-text strong {
+      color: var(--text-main);
+    }
+
+    /* Footer */
+    footer {
+      text-align: center;
+      padding: 30px 20px;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      border-top: 1px solid var(--border-color);
+      background: rgba(0, 0, 0, 0.2);
+    }
+
+    footer a {
+      color: var(--primary-color);
+      text-decoration: none;
+    }
+
+    footer a:hover {
+      text-decoration: underline;
+    }
+
+    @keyframes pulse {
+      0% {
+        opacity: 0.6;
+        transform: translate(-50%, -50%) scale(0.95);
+      }
+      100% {
+        opacity: 0.9;
+        transform: translate(-50%, -50%) scale(1.05);
+      }
+    }
+
+    @media (max-width: 600px) {
+      .logo {
+        font-size: 3rem;
+      }
+      .glass-card {
+        padding: 25px 15px;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <header>
+      <div class="logo-container">
+        <div class="logo-glow"></div>
+        <h1 class="logo">Latino</h1>
+      </div>
+      <p class="subtitle">Agregador premium de películas y series en español para Stremio</p>
+    </header>
+
+    <div class="glass-card">
+      <h2 class="card-title">Instalación Fácil</h2>
+      
+      <div class="actions">
+        <a href="${stremioInstallUrl}" class="btn-primary">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 4V20M20 12H4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Instalar en Stremio
+        </a>
+        
+        <p style="text-align: center; font-size: 0.9rem; color: var(--text-muted);">
+          ¿No abre automáticamente? Copia el enlace del manifest de abajo y pégalo en la barra de búsqueda de Stremio.
+        </p>
+
+        <div class="manifest-box">
+          <input type="text" class="manifest-input" value="${manifestUrl}" readonly onclick="this.select(); document.execCommand('copy'); alert('¡Enlace de manifest copiado!');">
+        </div>
+      </div>
+    </div>
+
+    <div class="glass-card">
+      <h2 class="card-title">English Streams</h2>
+
+      <div class="actions">
+        <a href="${englishStremioInstallUrl}" class="btn-primary">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 4V20M20 12H4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Install on Stremio
+        </a>
+
+        <p style="text-align: center; font-size: 0.9rem; color: var(--text-muted);">
+          Doesn't open automatically? Copy the manifest link below and paste it into Stremio's search bar.
+        </p>
+
+        <div class="manifest-box">
+          <input type="text" class="manifest-input" value="${englishManifestUrl}" readonly onclick="this.select(); document.execCommand('copy'); alert('Manifest link copied!');">
+        </div>
+      </div>
+    </div>
+
+    <div class="glass-card">
+      <h2 class="card-title">Fuentes Integradas</h2>
+      
+      <div class="grid-providers">
+        <div class="provider-item">
+          <div class="provider-name">SoloLatino.net</div>
+          <div class="provider-status">
+            <span class="dot"></span> Online
+          </div>
+        </div>
+        <div class="provider-item">
+          <div class="provider-name">Cinecalidad.am</div>
+          <div class="provider-status">
+            <span class="dot"></span> Online
+          </div>
+        </div>
+        <div class="provider-item">
+          <div class="provider-name">TioPlus.app</div>
+          <div class="provider-status">
+            <span class="dot"></span> Online
+          </div>
+        </div>
+        <div class="provider-item">
+          <div class="provider-name">LaMovie.org</div>
+          <div class="provider-status">
+            <span class="dot"></span> Online
+          </div>
+        </div>
+        <div class="provider-item">
+          <div class="provider-name">PelisPedia.mov</div>
+          <div class="provider-status">
+            <span class="dot"></span> Online
+          </div>
+        </div>
+        <div class="provider-item">
+          <div class="provider-name">Cuevana3i</div>
+          <div class="provider-status">
+            <span class="dot"></span> Online
+          </div>
+        </div>
+      </div>
+
+      <h2 class="card-title" style="margin-top: 40px; margin-bottom: 20px;">Cómo Configurar</h2>
+      <div class="steps">
+        <div class="step-item">
+          <div class="step-num">1</div>
+          <div class="step-text">Asegúrate de tener <strong>Stremio</strong> instalado en tu dispositivo (PC, Móvil, Smart TV o Fire Stick).</div>
+        </div>
+        <div class="step-item">
+          <div class="step-num">2</div>
+          <div class="step-text">Haz clic en el botón <strong>Instalar en Stremio</strong> superior para vincular el addon directamente.</div>
+        </div>
+        <div class="step-item">
+          <div class="step-num">3</div>
+          <div class="step-text">¡Todo listo! Ve al catálogo de Stremio y busca tus películas o series preferidas. Aparecerán los enlaces de <strong>Latino 🇲🇽</strong> con sus respectivos servidores de video.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <p>Latino Addon v${manifest.version} | Alimentado directamente por TMDB API</p>
+  </footer>
+
+</body>
+</html>
+  `;
+}
+
+// 3. Landing / Dashboard Page Route
+app.get('/', (req, res) => {
+  const host = req.get('host');
+  const protocol = getForwardedProtocol(req) || req.protocol;
+  const origin = `${protocol}://${host}`;
+
+  let page = landingPageByOrigin.get(origin);
+  if (page === undefined) {
+    page = renderLandingPage(protocol, host);
+    if (landingPageByOrigin.size >= LANDING_PAGE_MAX_ORIGINS) {
+      landingPageByOrigin.clear();
+    }
+    landingPageByOrigin.set(origin, page);
+  }
+
+  res.send(page);
+});
+
+app.__test = {
+  fetchFollowingRedirects,
+  getPublicBaseUrl,
+  getUpstreamUserAgent,
+  shouldProxyStream,
+  getProxyFilename,
+  isLikelyHlsManifestUrl,
+  proxiedStreamUrl,
+  rewriteHlsManifest
+};
+
+app.use('/english', englishAddonApp);
+
+module.exports = app;
