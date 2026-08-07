@@ -1,7 +1,7 @@
 /**
  * Embed69, wrapping the vendored Nuvio provider at src/vendor/embed69.js
  * (unmodified, from KennethJYS/Nuvio-Providers-Latino) behind this addon's
- * own scrape() interface. Like Torrentio it keys off a TMDB id rather than a
+ * own scrape() interface. It keys off a TMDB id rather than a
  * title match — it derives the IMDb id from it and fetches
  * embed69.org/f/<imdb> — so the orchestrator (src/scrapers/index.js) passes
  * one through in `options.tmdbId`, which it already resolves for every

@@ -10,7 +10,7 @@ const tlnovelas = require('./tlnovelas');
 const novelas360 = require('./novelas360');
 const ennovelas = require('./ennovelas');
 const embed69 = require('./embed69');
-const torrentio = require('./torrentio');
+const aiostreams = require('./aiostreams');
 const { fetchTextWithTimeout, normalizeUrl } = require('../http');
 const { hasBlockedIpLiteralHost } = require('../net-guard');
 const { createTtlCache } = require('../ttl-cache');
@@ -28,20 +28,19 @@ const SCRAPER_COLLECTION_TIMEOUT_MS = 8500;
 // Every per-source budget has to end strictly before collection does, with room
 // to spare: a source whose own deadline lands after the collection deadline can
 // never report at all, so it is permanently "pending" as far as the fast-return
-// gate is concerned. SoloLatino and Torrentio were both set to 12000 against a
-// collection timeout of 11500, and because Torrentio is a required source
-// (requiredNames below), that alone held every request open for the full
-// collection budget — the fast-return path could not fire. The headroom is what
+// gate is concerned. SoloLatino was set to 12000 against a collection timeout of
+// 11500, which held requests open longer than necessary. The headroom is what
 // lets a source that answers at the last moment still be counted and still have
 // its streams probed.
 const SOURCE_DEADLINE_HEADROOM_MS = 1000;
 const MAX_SOURCE_TIMEOUT_MS = SCRAPER_COLLECTION_TIMEOUT_MS - SOURCE_DEADLINE_HEADROOM_MS;
 const SCRAPER_TIMEOUT_MS = Math.min(10000, MAX_SOURCE_TIMEOUT_MS);
 const SOLOLATINO_TIMEOUT_MS = MAX_SOURCE_TIMEOUT_MS;
-// Torrentio's own debrid-resolution round trip runs behind whatever debrid
-// provider is configured, on top of its own torrent-indexer lookup, so it
-// gets a longer budget than the HTML scrapers — up to the ceiling above.
-const TORRENTIO_TIMEOUT_MS = MAX_SOURCE_TIMEOUT_MS;
+// AIOStreams' own debrid-resolution round trip runs behind whatever debrid
+// provider its instance is configured with, on top of its own indexer
+// lookup, so it gets a longer budget than the HTML scrapers — up to the
+// ceiling above.
+const AIOSTREAMS_TIMEOUT_MS = MAX_SOURCE_TIMEOUT_MS;
 const EMPTY_RESULT_GRACE_MS = 3500;
 // Return as soon as this many sources have produced this many streams between
 // them. Requiring two sources rather than one keeps the early exit from simply
@@ -154,46 +153,18 @@ function getStreamHost(stream) {
   return host;
 }
 
-/**
- * Torrentio's debrid integration hands back an authenticated HTTPS link on its
- * own host, not a magnet or a torrent file, so it is safe to keep once the
- * source has established the entry as cached.
- *
- * Matched on host rather than path. The path was pinned to
- * `/resolve/torbox/`, which Torrentio never emits — its debrid links are
- * `/<provider>/<key>/<hash>/…` — so the exemption never fired, and since every
- * one of these streams is named "Torrentio", the `name.includes('torrent')`
- * rule below dropped the addon's only debrid-backed source in full. The path
- * layout is Torrentio's to change; the host and the `__cached` flag are what
- * actually carry the meaning here.
- */
-function isCachedDebridResolverUrl(stream) {
-  if (stream.__cached !== true) return false;
-
-  try {
-    const parsed = new URL(stream.url);
-    return parsed.protocol === 'https:'
-      && parsed.hostname.toLowerCase() === 'torrentio.strem.fun';
-  } catch {
-    return false;
-  }
-}
-
 function isKnownBadStream(stream) {
   const url = (stream.url || '').toLowerCase();
   const title = (stream.title || '').toLowerCase();
   const name = (stream.name || '').toLowerCase();
-  const isCachedTorboxResolver = isCachedDebridResolverUrl(stream);
   return url.includes('test-videos.co.uk')
     || url.includes('big_buck_bunny')
     || url.includes('magnet:')
     || url.includes('.torrent')
     || url.includes('strp2p.com')
-    || (!isCachedTorboxResolver && (
-      title.includes('p2p')
-      || title.includes('torrent')
-      || name.includes('torrent')
-    ));
+    || title.includes('p2p')
+    || title.includes('torrent')
+    || name.includes('torrent');
 }
 
 function getHostHealth(host) {
@@ -491,8 +462,6 @@ async function collectScraperResults(tasks, timeoutMs, onResult, options = {}) {
   const getConfirmedCount = options.getConfirmedCount || (() => 0);
 
   const hasEnoughStreamsForFastReturn = () => {
-    // Cached Torrentio streams are the addon's only debrid-backed source. Do
-    // not return a partial response before it has had a chance to report.
     if (![...requiredNames].every((name) => results.some((result) => result.name === name))) {
       return false;
     }
@@ -1330,7 +1299,7 @@ async function getStreamsUncached(type, id, season, episode) {
       createScraperTask(novelas360, 'Novelas360', buildScraperArgs('Novelas360', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
       createScraperTask(ennovelas, 'Ennovelas', buildScraperArgs('Ennovelas', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles),
       createScraperTask(embed69, 'Embed69', buildScraperArgs('Embed69', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, extraTitles, { tmdbId }),
-      createScraperTask(torrentio, 'Torrentio', buildScraperArgs('Torrentio', title, originalTitle, year, type, season, episode), TORRENTIO_TIMEOUT_MS, extraTitles, { tmdbId })
+      createScraperTask(aiostreams, 'AIOStreams', buildScraperArgs('AIOStreams', title, originalTitle, year, type, season, episode), AIOSTREAMS_TIMEOUT_MS, extraTitles, { imdbId })
     ];
 
     if (ENABLE_CINEHDPLUS) {
@@ -1360,8 +1329,7 @@ async function getStreamsUncached(type, id, season, episode) {
       (streams) => startEagerValidation(streams, validator),
       {
         getConfirmedCount: () => validator.confirmed,
-        gate: fastReturnGate,
-        requiredNames: ['Torrentio']
+        gate: fastReturnGate
       }
     );
 
@@ -1417,16 +1385,9 @@ async function getStreamsUncached(type, id, season, episode) {
     // variants no longer resolve scores 1, so it landed at the top of the list
     // and was the first thing a viewer clicked.
     const selected = await validatePlayableStreams(sanitizedStreams, validator, validationController, remainingBudgetMs());
-    // Cached Torrentio streams are the debrid-backed first choice. Keep their
-    // final position stable even when host/quality ranking has reordered the
-    // remaining direct-provider results during validation.
-    const torrentioFirst = [
-      ...selected.filter((stream) => stream.name === 'Torrentio'),
-      ...selected.filter((stream) => stream.name !== 'Torrentio')
-    ];
     // Labeling happens here rather than inside validatePlayableStreams, which has
     // three ways out: a label written twice reads as "1080p • 1080p".
-    return torrentioFirst.map(withQualityLabel);
+    return selected.map(withQualityLabel);
 
   } catch (err) {
     console.error('Error in combined getStreams:', err.message);

@@ -7,6 +7,12 @@
  * instance itself, not here - this just forwards the request and shapes the
  * response into the { name, title, url, quality, __cached } stream objects
  * every other provider in this addon returns.
+ *
+ * One exception: this is the English addon, and the same AIOStreams instance
+ * also backs the Latino addon (src/scrapers/aiostreams.js) at the repo root,
+ * so its results are a mix of every audio language. Latino-audio results are
+ * dropped here so this addon's list stays English-only; the Latino addon
+ * does the mirror-image filter, keeping only Latino-audio results.
  */
 
 const AIOSTREAMS_BASE_URL = process.env.AIOSTREAMS_BASE_URL
@@ -18,6 +24,24 @@ const AIOSTREAMS_TIMEOUT_MS = 8000;
 
 function authHeader() {
   return `Basic ${Buffer.from(`${AIOSTREAMS_UUID}:${AIOSTREAMS_PASSWORD}`).toString('base64')}`;
+}
+
+// Flags for Latin American Spanish-speaking countries only — deliberately
+// excludes 🇪🇸. Release titles that carry both an audio-language tag list a
+// separate "castellano" (Spain) track from "latino" ("ENG.LATINO.CASTELLANO...")
+// as two distinct dubs, so castellano/español/spanish are not treated as
+// synonyms for latino here: including them would exclude a stream from this
+// English-only list purely for also carrying a Spain-Spanish track.
+const LATINO_FLAG_EMOJIS = [
+  '🇲🇽', '🇦🇷', '🇨🇴', '🇨🇱', '🇵🇪', '🇻🇪', '🇺🇾', '🇧🇴', '🇪🇨',
+  '🇵🇾', '🇨🇷', '🇵🇦', '🇩🇴', '🇬🇹', '🇭🇳', '🇳🇮', '🇸🇻', '🇵🇷', '🇬🇶'
+];
+const LATINO_KEYWORD_PATTERN = /\b(latino|lat(?:am)?)\b/i;
+
+function isLatinoAudioStream(title) {
+  const text = String(title || '');
+  if (LATINO_FLAG_EMOJIS.some((flag) => text.includes(flag))) return true;
+  return LATINO_KEYWORD_PATTERN.test(text);
 }
 
 async function fetchAiostreamsStreams(imdbId, mediaType, seasonNum, episodeNum, { timeoutMs = AIOSTREAMS_TIMEOUT_MS } = {}) {
@@ -37,6 +61,7 @@ async function fetchAiostreamsStreams(imdbId, mediaType, seasonNum, episodeNum, 
     if (!Array.isArray(results)) return [];
 
     return results
+      .filter((result) => !isLatinoAudioStream(result.filename || result.parsedFile?.title))
       .map((result) => ({
         name: result.addon || result.indexer || 'AIOStreams',
         title: result.filename || result.parsedFile?.title || 'AIOStreams',
@@ -44,8 +69,7 @@ async function fetchAiostreamsStreams(imdbId, mediaType, seasonNum, episodeNum, 
         quality: result.parsedFile?.resolution || null,
         size: result.size || null,
         __cached: result.cached === true
-      }))
-      .filter((stream) => Boolean(stream.url));
+      }));
   } catch (error) {
     console.warn(`AIOStreams request failed: ${error.message}`);
     return [];
@@ -54,4 +78,4 @@ async function fetchAiostreamsStreams(imdbId, mediaType, seasonNum, episodeNum, 
   }
 }
 
-module.exports = { fetchAiostreamsStreams };
+module.exports = { fetchAiostreamsStreams, __test: { isLatinoAudioStream } };

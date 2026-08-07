@@ -33,9 +33,9 @@ the others) that pulls in `sqlite`, `worker_threads`, `http2` — a different
 shape of thing than the rest. In testing it took ~16s per call and returned
 zero results.
 
-**AIOStreams** replaced Torrentio as the debrid-backed source. It's fetched
-directly by IMDb id (`src/providers/aiostreams.js`) against a self-hosted
-AIOStreams instance's search API:
+**AIOStreams** is the debrid-backed source. It's fetched directly by IMDb id
+(`src/providers/aiostreams.js`) against a self-hosted AIOStreams instance's
+search API:
 
 ```
 GET {AIOSTREAMS_BASE_URL}?type=movie|series&id=<imdbId[:season:episode]>
@@ -44,11 +44,17 @@ Authorization: Basic base64(uuid:password)
 
 Configured via `AIOSTREAMS_BASE_URL` / `AIOSTREAMS_UUID` /
 `AIOSTREAMS_PASSWORD` env vars (each has a working default baked into
-`aiostreams.js`; override for a different instance or account). Unlike the
-old Torrentio integration, there's no HDR filtering, debrid-cache gating, or
-retry logic layered on top here — the AIOStreams instance is expected to do
-its own filtering, and results are curated/probed the same as every other
-provider.
+`aiostreams.js`; override for a different instance or account). No
+filtering — no HDR filtering, debrid-cache gating, URL dedupe, or retry
+logic — is layered on top anywhere in this addon, with one exception: the
+same AIOStreams instance also backs the Latino addon at the repo root
+(`src/scrapers/aiostreams.js`), so its results mix every audio language.
+`aiostreams.js` here drops anything tagged Latin American Spanish audio (a
+Latin American country flag emoji, or a `latino`/`latam` keyword —
+deliberately not 🇪🇸/`castellano`/`español`/`spanish`, since a release often
+lists Spain and Latin American dubs as two separate tracks) so this addon's
+list stays English-only; everything else the instance returns is passed
+straight through to Stremio.
 
 Verified end-to-end against the running server (`tt0137523` / Fight Club):
 35 streams back from 6 of 11 providers in ~5.8s. A series lookup

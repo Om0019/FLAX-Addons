@@ -20,10 +20,19 @@ const { resolutionTier, TIER_ORDER } = require('./curate');
  * one we keep: a label is a claim about the bytes, and the same bytes cannot be
  * two resolutions. Provider attribution still goes to the highest-ranked
  * provider offering the link, since ordering across providers is unchanged.
+ *
+ * AIOStreams entries are exempt: it does its own filtering upstream, so
+ * nothing here should ever collapse or drop one of its results.
  */
 function dedupeByUrl(entries) {
   const bestByUrl = new Map();
+  const aiostreamsEntries = [];
   for (const entry of entries) {
+    if (entry.providerId === 'aiostreams') {
+      aiostreamsEntries.push(entry);
+      continue;
+    }
+
     const url = entry.raw?.url;
     if (!url) continue;
 
@@ -39,7 +48,7 @@ function dedupeByUrl(entries) {
       bestByUrl.set(url, { ...existing, resolution: entry.resolution, raw: entry.raw });
     }
   }
-  return [...bestByUrl.values()];
+  return [...aiostreamsEntries, ...bestByUrl.values()];
 }
 
 /**
