@@ -1,11 +1,13 @@
-// curateNonAiostreams (src/curate.js): caps the non-AIOStreams portion of a
-// request to 3 streams, one per scraper, most reliable scrapers first, while
-// leaving AIOStreams entries untouched and uncapped.
+// curateStreams (src/curate.js): caps a request's stream list two ways -
+// non-AIOStreams streams to 3 (one per scraper, most reliable first), and
+// AIOStreams streams to 3 (one per quality tier: 2160p, 1080p, other) -
+// mirroring english-addon/src/curate.js's own two caps.
 
 const assert = require('assert');
-const { curateNonAiostreams, SCRAPER_PRIORITY, MAX_NON_AIOSTREAMS } = require('./src/curate');
+const { curateStreams, SCRAPER_PRIORITY, MAX_NON_AIOSTREAMS, AIOSTREAMS_TIERS } = require('./src/curate');
 
-const stream = (sourceLabel, url) => ({ __sourceLabel: sourceLabel, url, name: sourceLabel });
+const stream = (sourceLabel, url, quality) => ({ __sourceLabel: sourceLabel, url, name: sourceLabel, quality });
+const aioStream = (url, height) => stream('AIOStreams', url, height ? { height } : null);
 
 function testCapsToThreeMostReliableScrapers() {
   const selected = [
@@ -16,29 +18,10 @@ function testCapsToThreeMostReliableScrapers() {
     stream('Embed69', 'e')
   ];
 
-  const curated = curateNonAiostreams(selected);
+  const curated = curateStreams(selected);
 
   assert.strictEqual(curated.length, MAX_NON_AIOSTREAMS);
   assert.deepStrictEqual(curated.map((s) => s.__sourceLabel), ['SoloLatino', 'TioPlus', 'PelisPedia']);
-}
-
-function testAioStreamsIsUncappedAndUnaffectedByCap() {
-  const selected = [
-    stream('AIOStreams', 'a'),
-    stream('AIOStreams', 'b'),
-    stream('AIOStreams', 'c'),
-    stream('SoloLatino', 'd'),
-    stream('TioPlus', 'e'),
-    stream('PelisPedia', 'f'),
-    stream('Embed69', 'g')
-  ];
-
-  const curated = curateNonAiostreams(selected);
-
-  const aioCount = curated.filter((s) => s.__sourceLabel === 'AIOStreams').length;
-  const nonAioCount = curated.length - aioCount;
-  assert.strictEqual(aioCount, 3, 'every AIOStreams entry survives the cap');
-  assert.strictEqual(nonAioCount, MAX_NON_AIOSTREAMS);
 }
 
 function testOnlyOneStreamPerScraper() {
@@ -48,7 +31,7 @@ function testOnlyOneStreamPerScraper() {
     stream('TioPlus', 'c')
   ];
 
-  const curated = curateNonAiostreams(selected);
+  const curated = curateStreams(selected);
 
   assert.strictEqual(curated.length, 2);
   assert.strictEqual(curated[0].url, 'a', 'a scraper contributes its first surviving stream, not a later one');
@@ -63,7 +46,7 @@ function testOriginalOrderIsPreserved() {
     stream('SoloLatino', 'second-best-host')
   ];
 
-  const curated = curateNonAiostreams(selected);
+  const curated = curateStreams(selected);
 
   assert.deepStrictEqual(curated.map((s) => s.url), ['best-host', 'second-best-host']);
 }
@@ -71,7 +54,7 @@ function testOriginalOrderIsPreserved() {
 function testUnknownScraperStillCompetesForASlot() {
   const selected = [stream('SomeNewScraper', 'a'), stream('SoloLatino', 'b')];
 
-  const curated = curateNonAiostreams(selected);
+  const curated = curateStreams(selected);
 
   assert.strictEqual(curated.length, 2, 'a scraper missing from SCRAPER_PRIORITY is not excluded outright');
 }
@@ -79,13 +62,13 @@ function testUnknownScraperStillCompetesForASlot() {
 function testFewerThanThreeScrapersReturnsAllOfThem() {
   const selected = [stream('SoloLatino', 'a'), stream('TioPlus', 'b')];
 
-  const curated = curateNonAiostreams(selected);
+  const curated = curateStreams(selected);
 
   assert.strictEqual(curated.length, 2);
 }
 
 function testEmptyListReturnsEmpty() {
-  assert.deepStrictEqual(curateNonAiostreams([]), []);
+  assert.deepStrictEqual(curateStreams([]), []);
 }
 
 function testScraperPriorityCoversEveryNonAiostreamsSource() {
@@ -98,15 +81,61 @@ function testScraperPriorityCoversEveryNonAiostreamsSource() {
   }
 }
 
+function testAiostreamsCapsToOnePerQualityTier() {
+  const selected = [
+    aioStream('a', 2160),
+    aioStream('b', 2160),
+    aioStream('c', 1080),
+    aioStream('d', 1080),
+    aioStream('e', 720),
+    aioStream('f', null)
+  ];
+
+  const curated = curateStreams(selected);
+
+  assert.strictEqual(curated.length, AIOSTREAMS_TIERS.length);
+  assert.deepStrictEqual(curated.map((s) => s.url), ['a', 'c', 'e']);
+}
+
+function testAiostreams720AndUnlabeledShareTheSameLowerTier() {
+  const selected = [aioStream('a', null), aioStream('b', 720)];
+
+  const curated = curateStreams(selected);
+
+  assert.strictEqual(curated.length, 1);
+  assert.strictEqual(curated[0].url, 'a');
+}
+
+function testAiostreamsAndNonAiostreamsCapsApplyIndependently() {
+  const selected = [
+    aioStream('a', 2160),
+    aioStream('b', 1080),
+    aioStream('c', 720),
+    stream('SoloLatino', 'd'),
+    stream('TioPlus', 'e'),
+    stream('PelisPedia', 'f'),
+    stream('Embed69', 'g')
+  ];
+
+  const curated = curateStreams(selected);
+
+  const aioUrls = curated.filter((s) => s.__sourceLabel === 'AIOStreams').map((s) => s.url);
+  const nonAioUrls = curated.filter((s) => s.__sourceLabel !== 'AIOStreams').map((s) => s.url);
+  assert.deepStrictEqual(aioUrls, ['a', 'b', 'c']);
+  assert.deepStrictEqual(nonAioUrls, ['d', 'e', 'f']);
+}
+
 function run() {
   testCapsToThreeMostReliableScrapers();
-  testAioStreamsIsUncappedAndUnaffectedByCap();
   testOnlyOneStreamPerScraper();
   testOriginalOrderIsPreserved();
   testUnknownScraperStillCompetesForASlot();
   testFewerThanThreeScrapersReturnsAllOfThem();
   testEmptyListReturnsEmpty();
   testScraperPriorityCoversEveryNonAiostreamsSource();
+  testAiostreamsCapsToOnePerQualityTier();
+  testAiostreams720AndUnlabeledShareTheSameLowerTier();
+  testAiostreamsAndNonAiostreamsCapsApplyIndependently();
 
   console.log('All curate tests passed.');
 }

@@ -14,7 +14,7 @@ const aiostreams = require('./aiostreams');
 const { fetchTextWithTimeout, normalizeUrl } = require('../http');
 const { hasBlockedIpLiteralHost } = require('../net-guard');
 const { createTtlCache } = require('../ttl-cache');
-const { curateNonAiostreams } = require('../curate');
+const { curateStreams } = require('../curate');
 const {
   bestQuality,
   claimedQuality,
@@ -1419,8 +1419,8 @@ async function getStreamsUncached(type, id, season, episode) {
           console.log(`${name} returned ${res.value.length} streams`);
           // Tagged with the orchestrator's own task label - not read from
           // stream.name, which for AIOStreams is the upstream addon/indexer
-          // name, not "AIOStreams" - so curateNonAiostreams (src/curate.js)
-          // can tell an AIOStreams result from a scraper's own regardless of
+          // name, not "AIOStreams" - so curateStreams (src/curate.js) can
+          // tell an AIOStreams result from a scraper's own regardless of
           // what either wrote into `name`.
           streams.push(...res.value.map((stream) => ({ ...stream, __sourceLabel: name })));
         } else {
@@ -1441,9 +1441,10 @@ async function getStreamsUncached(type, id, season, episode) {
     // and was the first thing a viewer clicked.
     const selected = await validatePlayableStreams(sanitizedStreams, validator, validationController, remainingBudgetMs());
     // Caps the non-AIOStreams streams to 3, one per scraper, favoring the
-    // scrapers reliability testing found actually deliver a playable link -
-    // AIOStreams itself is exempt and stays uncapped. See src/curate.js.
-    const curated = curateNonAiostreams(selected);
+    // scrapers reliability testing found actually deliver a playable link;
+    // AIOStreams streams are capped separately to 3, one per quality tier.
+    // See src/curate.js.
+    const curated = curateStreams(selected);
     // Labeling happens here rather than inside validatePlayableStreams, which has
     // three ways out: a label written twice reads as "1080p • 1080p".
     return curated.map(withQualityLabel);
