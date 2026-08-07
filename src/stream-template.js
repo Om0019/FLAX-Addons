@@ -7,10 +7,9 @@
  *   Description: Latino{container ? " • " + container : ""}{resolution ? " • " + resolution : ""}
  *
  * `indexer` is whatever a scraper set as the stream's `name` before this
- * runs (e.g. "SoloLatino", "Torrentio") - there's no finer per-tracker
- * detail (e.g. Torrentio's own indexer like "YTS") available as a separate
- * field on these stream objects, only embedded in free-text titles, so this
- * doesn't try to parse it out.
+ * runs (e.g. "SoloLatino", "Cuevana3i") - there's no finer per-source detail
+ * available as a separate field on these stream objects, only embedded in
+ * free-text titles, so this doesn't try to parse it out.
  */
 
 const { formatQuality } = require('./quality');

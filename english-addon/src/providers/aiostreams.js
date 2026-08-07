@@ -36,16 +36,14 @@ async function fetchAiostreamsStreams(imdbId, mediaType, seasonNum, episodeNum, 
     const results = payload?.success ? payload.data?.results : null;
     if (!Array.isArray(results)) return [];
 
-    return results
-      .map((result) => ({
-        name: result.addon || result.indexer || 'AIOStreams',
-        title: result.filename || result.parsedFile?.title || 'AIOStreams',
-        url: result.url,
-        quality: result.parsedFile?.resolution || null,
-        size: result.size || null,
-        __cached: result.cached === true
-      }))
-      .filter((stream) => Boolean(stream.url));
+    return results.map((result) => ({
+      name: result.addon || result.indexer || 'AIOStreams',
+      title: result.filename || result.parsedFile?.title || 'AIOStreams',
+      url: result.url,
+      quality: result.parsedFile?.resolution || null,
+      size: result.size || null,
+      __cached: result.cached === true
+    }));
   } catch (error) {
     console.warn(`AIOStreams request failed: ${error.message}`);
     return [];

@@ -47,8 +47,8 @@ const MIN_PROVIDER_TIMEOUT_MS = 1500;
 // netmirror was dropped: providers/netmirror.js and its docblock above are
 // history now, not a currently-loaded provider.
 //
-// torrentio was replaced by AIOStreams (see aiostreams.js): fetched directly
-// below by IMDb id, not loaded from providers/*.js.
+// AIOStreams (see aiostreams.js) is the debrid-backed source: fetched
+// directly below by IMDb id, not loaded from providers/*.js.
 const PROVIDERS = [
   { id: 'videasy', name: 'VidEasy', file: 'videasy.js' },
   { id: 'peachify', name: 'Peachify', file: 'peachify.js' },
