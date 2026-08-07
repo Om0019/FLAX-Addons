@@ -1033,8 +1033,13 @@ function createStreamValidator(signal, onConfirmed) {
  * so the work overlaps the sources that have not finished yet.
  */
 function startEagerValidation(streams, validator) {
+  // AIOStreams' debrid resolve links (__cached === true) are exempt from
+  // probing entirely — see validatePlayableStreams — so there is nothing for
+  // the eager pass to start on them either.
   const candidates = sortStreams(
-    streams.map(sanitizeStream).filter(Boolean).filter((stream) => !shouldSkipHost(stream))
+    streams.map(sanitizeStream).filter(Boolean)
+      .filter((stream) => stream.__cached !== true)
+      .filter((stream) => !shouldSkipHost(stream))
   );
 
   // Counted on the validator's own tally rather than on loop iterations: probes
@@ -1058,7 +1063,7 @@ function startEagerValidation(streams, validator) {
  * own deadline is whichever of the two is shorter — the phase can be as quick as
  * it likes, but it may not extend a request that has already spent its time.
  */
-async function validatePlayableStreams(streams, validator, validationController, remainingBudgetMs = Infinity) {
+async function validateProbeableStreams(streams, validator, validationController, remainingBudgetMs = Infinity) {
   const sortedStreams = sortStreams(streams);
   const eligibleStreams = sortedStreams.filter((stream) => !shouldSkipHost(stream));
   const skippedStreams = sortedStreams.filter(shouldSkipHost);
@@ -1212,6 +1217,27 @@ async function validatePlayableStreams(streams, validator, validationController,
     console.warn('Scraper orchestrator: Validation found no confirmed playable streams; returning URL-sanitized streams to avoid a false empty result.');
   }
   return withoutDisprovenStreams(sortedStreams);
+}
+
+/**
+ * AIOStreams links (`__cached === true`) are debrid resolve endpoints, not
+ * addressable files: the byte-range probe below asks the debrid service to
+ * hand one over, which can take longer than any probe deadline this addon
+ * affords, and a timeout is kept anyway — so probing one only spends budget
+ * the real file-URL providers' probes need, to reach the conclusion it
+ * started with. Skipped entirely instead, and always kept: if AIOStreams,
+ * its indexer, or the debrid service behind it is actually down, that shows
+ * up as AIOStreams returning nothing — not as one resolve link failing a
+ * probe it was never suited to.
+ */
+async function validatePlayableStreams(streams, validator, validationController, remainingBudgetMs = Infinity) {
+  const exemptStreams = streams.filter((stream) => stream.__cached === true);
+  const probeableStreams = streams.filter((stream) => stream.__cached !== true);
+
+  if (probeableStreams.length === 0) return exemptStreams;
+
+  const probed = await validateProbeableStreams(probeableStreams, validator, validationController, remainingBudgetMs);
+  return [...exemptStreams, ...probed];
 }
 
 /**
